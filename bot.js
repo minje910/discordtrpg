@@ -24,7 +24,7 @@ const NPC_FILE        = path.join(DATA_DIR, 'npcs.json');
 const COMBAT_FILE     = path.join(DATA_DIR, 'combat.json');
 const SCENE_FILE      = path.join(DATA_DIR, 'scenes.json');
 const DECLARE_FILE    = path.join(DATA_DIR, 'declarations.json');
-const TURN_TIMEOUT_MS = 5 * 60 * 1000; // 5분
+const TURN_TIMEOUT_MS = 10 * 60 * 1000; // 10분 (Deadly Strike 규칙)
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -288,10 +288,45 @@ function effStat(char, s) {
 }
 function calcMaxHP(char) {
   const hp = effStat(char, '체력');
-  return hp === Infinity ? Infinity : hp * 10;
+  return hp === Infinity ? Infinity : hp * 5;          // Deadly Strike: 체력 × 5
+}
+function npcMaxHP(npc) {
+  const hp = npc?.stats?.체력 ?? 0;
+  return hp * 5;
 }
 function requiredExp(lv)   { return lv * 10; }
 function rollDice(n, s)    { return Array.from({ length: n }, () => Math.floor(Math.random() * s) + 1); }
+
+// 보정치: 능력치 / 10, 소수점 첫째 자리까지
+function calcBonus(stat) {
+  if (stat === Infinity) return Infinity;
+  return Math.round((stat / 10) * 10) / 10;
+}
+function fmtBonus(b) {
+  if (b === Infinity) return '∞';
+  return Number.isInteger(b) ? `${b}.0` : `${b}`;
+}
+
+// 숙련도 스택: 능력치 20당 d20 +1, 최댓값 선택 (최소 1개)
+function rollProficiency(stat) {
+  if (stat === Infinity) return { rolls: [20], picked: 20, count: 1 };
+  const count  = Math.max(1, 1 + Math.floor((stat ?? 0) / 20));
+  const rolls  = rollDice(count, 20);
+  const picked = Math.max(...rolls);
+  return { rolls, picked, count };
+}
+
+// 폭발 주사위: 최댓값 나오면 한 번 더 굴려 합산 (연속, 안전장치 100회)
+function rollExploding(count, sides) {
+  const all = [];
+  let pending = count, safety = 100;
+  while (pending > 0 && safety-- > 0) {
+    const rolls = rollDice(pending, sides);
+    all.push(...rolls);
+    pending = rolls.filter(r => r === sides).length;
+  }
+  return all;
+}
 
 function makeHPBar(cur, max) {
   if (max === Infinity || max === 0) return '`∞`';
@@ -401,7 +436,7 @@ function missionEmbed(mid, m) {
 }
 
 function npcEmbed(nid, npc) {
-  const maxHP = npc.hp?.max ?? (npc.stats?.체력 ? npc.stats.체력 * 10 : 0);
+  const maxHP = npc.hp?.max ?? npcMaxHP(npc);
   let desc = `**종족**: ${npc.race || '미등록'}  |  **직업**: ${npc.job || '미등록'}`;
   if (npc.hasLevel) desc += `  |  **Lv.${npc.level}**  |  EXP보상: **${npc.level}**`;
   if (npc.affiliation && npc.affiliation !== '미등록') desc += `\n**소속**: ${npc.affiliation}`;
@@ -631,7 +666,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const specialStats = parseSpecialStats(specialRaw);
-      const maxHP        = (stats['체력'] ?? 0) * 10;
+      const maxHP        = (stats['체력'] ?? 0) * 5;
       const npc = {
         ...partial,
         stats,
@@ -876,40 +911,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
     initChar(char);
     let embed;
+    const fmtRolls = (rolls, picked) => rolls.map(r => r === picked ? `**${r}**` : `${r}`).join(', ');
     if (sub === '방어') {
-      const stat = effStat(char, '체력'), bonus = Math.floor(stat / 10);
+      const stat = effStat(char, '체력'), bonus = calcBonus(stat);
+      const { rolls, picked, count } = rollProficiency(stat);
+      const total = Math.round((picked + bonus) * 10) / 10;
       embed = new EmbedBuilder().setTitle('🛡️ 방어 판정').setColor(0x3498DB)
-        .setDescription(`**결과: ${10 + bonus}**\n10 + (체력 ${stat} / 10) = 10 + ${bonus}`);
+        .setDescription(`**결과: ${total}**\nd20×${count} → [${fmtRolls(rolls, picked)}] → **${picked}** + (체력 ${stat}/10 = ${fmtBonus(bonus)})`);
     } else if (sub === '회피') {
-      const stat = effStat(char, '민첩'), bonus = Math.floor(stat / 10);
+      const stat = effStat(char, '민첩'), bonus = calcBonus(stat);
+      const { rolls, picked, count } = rollProficiency(stat);
+      const total = Math.round((picked + bonus) * 10) / 10;
       embed = new EmbedBuilder().setTitle('💨 회피 판정').setColor(0x1ABC9C)
-        .setDescription(`**결과: ${10 + bonus}**\n10 + (민첩 ${stat} / 10) = 10 + ${bonus}`);
+        .setDescription(`**결과: ${total}**\nd20×${count} → [${fmtRolls(rolls, picked)}] → **${picked}** + (민첩 ${stat}/10 = ${fmtBonus(bonus)})`);
     } else if (sub === '일반' || sub === '공격') {
       const statName = interaction.options.getString('능력치');
       const stat = effStat(char, statName);
       if (stat === 0 && !(statName in char.stats) && !(statName in char.specialStats))
         return interaction.reply({ content: `❌ \`${statName}\` 스탯을 찾을 수 없습니다.`, ephemeral: true });
-      const bonus = Math.floor(stat / 10), d20 = rollDice(1, 20)[0];
+      const bonus = calcBonus(stat);
+      const { rolls, picked, count } = rollProficiency(stat);
+      const total = Math.round((picked + bonus) * 10) / 10;
       embed = new EmbedBuilder()
         .setTitle(sub === '공격' ? '⚔️ 공격 판정' : '🎯 일반 판정').setColor(0xE67E22)
         .addFields(
-          { name: '🎲 d20',    value: `**${d20}**`,                         inline: true },
-          { name: '➕ 보너스', value: `${bonus} (${statName} ${stat}/10)`, inline: true },
-          { name: '📊 합계',   value: `**${d20 + bonus}**`,                inline: true },
+          { name: `🎲 d20 × ${count} (숙련도 스택)`, value: `[${fmtRolls(rolls, picked)}] → **${picked}**`, inline: false },
+          { name: '➕ 보너스', value: `${fmtBonus(bonus)} (${statName} ${stat}/10)`, inline: true },
+          { name: '📊 합계',   value: `**${total}**`,                inline: true },
         );
     } else if (sub === '데미지') {
       const statName = interaction.options.getString('능력치');
       const diceStr  = interaction.options.getString('주사위');
       const match    = diceStr.match(/^(\d+)[dD](\d+)$/);
       if (!match) return interaction.reply({ content: '❌ 주사위 형식 오류. 예) `2d6`', ephemeral: true });
-      const stat = effStat(char, statName), bonus = Math.floor(stat / 10);
-      const rolls = rollDice(parseInt(match[1]), parseInt(match[2]));
+      const stat = effStat(char, statName), bonus = calcBonus(stat);
+      const baseCount = parseInt(match[1]), sides = parseInt(match[2]);
+      const rolls = rollExploding(baseCount, sides);
+      const exploded = rolls.length > baseCount;
       const dtotal = rolls.reduce((a,b) => a+b, 0);
+      const final = Math.round((dtotal + bonus) * 10) / 10;
       embed = new EmbedBuilder().setTitle('💥 데미지 판정').setColor(0xE74C3C)
         .addFields(
-          { name: `🎲 ${diceStr}`, value: `${rolls.join(' + ')} = **${dtotal}**`,      inline: false },
-          { name: '➕ 보너스',     value: `${bonus} (${statName} ${stat}/10)`,         inline: true  },
-          { name: '💥 총 데미지',  value: `**${dtotal + bonus}**`,                    inline: true  },
+          { name: `🎲 ${diceStr}${exploded ? ' 💥 폭발!' : ''}`, value: `${rolls.join(' + ')} = **${dtotal}**`,      inline: false },
+          { name: '➕ 보너스',     value: `${fmtBonus(bonus)} (${statName} ${stat}/10)`,         inline: true  },
+          { name: '💥 총 데미지',  value: `**${final}**`,                    inline: true  },
         );
     }
     if (embed) { embed.setFooter({ text: `${char.nickname}의 판정` }); return interaction.reply({ embeds: [embed] }); }
@@ -1033,7 +1078,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const npcId = interaction.options.getString('id'), action = interaction.options.getString('행동'), amount = interaction.options.getInteger('값');
     const npcs = loadJSON(NPC_FILE);
     if (!npcs[npcId]) return interaction.reply({ content: `❌ NPC ID \`${npcId}\`를 찾을 수 없습니다.`, ephemeral: true });
-    const npc = npcs[npcId]; if (!npc.hp) npc.hp = { current: 0, max: (npc.stats?.체력 || 0) * 10 };
+    const npc = npcs[npcId]; if (!npc.hp) npc.hp = { current: 0, max: npcMaxHP(npc) };
     const before = npc.hp.current;
     if (action === '하락')       npc.hp.current = Math.max(0, npc.hp.current - amount);
     else if (action === '회복')  npc.hp.current = Math.min(npc.hp.max, npc.hp.current + amount);
@@ -1077,7 +1122,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!statName || isNaN(statVal)) return interaction.reply({ content: '❌ 형식: `스탯이름 숫자`', ephemeral: true });
       npc.stats = npc.stats || {};
       npc.stats[statName] = statVal;
-      if (statName === '체력') { npc.hp = npc.hp || {}; npc.hp.max = statVal * 10; npc.hp.current = Math.min(npc.hp.current ?? npc.hp.max, npc.hp.max); }
+      if (statName === '체력') { npc.hp = npc.hp || {}; npc.hp.max = statVal * 5; npc.hp.current = Math.min(npc.hp.current ?? npc.hp.max, npc.hp.max); }
       resultMsg = `📈 스탯 **${statName}** → **${statVal}**`;
     } else if (field === '특수스탯') {
       const parts = rawVal.trim().split(/\s+/);
@@ -1414,7 +1459,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.reply({ content: `🏁 **전투 종료!** (총 ${roundsPlayed} 라운드)` });
   }
 
-  // ── 공격 (통합 명령어) ───────────────────────────
+  // ── 공격 (Deadly Strike: 명중 격차 + 폭발 주사위 + 크리티컬 배수) ──
   if (cmd === '공격') {
     const targetRaw = interaction.options.getString('대상');
     const statName  = interaction.options.getString('능력치');
@@ -1425,20 +1470,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
     initChar(char);
 
-    const stat  = effStat(char, statName);
-    if (stat === 0 && !(statName in char.stats) && !(statName in char.specialStats))
+    const atkStat = effStat(char, statName);
+    if (atkStat === 0 && !(statName in char.stats) && !(statName in char.specialStats))
       return interaction.reply({ content: `❌ \`${statName}\` 스탯을 찾을 수 없습니다.`, ephemeral: true });
 
-    const atkBonus = Math.floor(stat / 10);
-    const atkRoll  = rollDice(1, 20)[0];
-    const atkTotal = atkRoll + atkBonus;
+    const fmtRolls = (rolls, picked) => rolls.map(r => r === picked ? `**${r}**` : `${r}`).join(', ');
 
-    // 대상이 NPC ID인지 확인
+    // 공격 판정
+    const atkBonus = calcBonus(atkStat);
+    const atkProf  = rollProficiency(atkStat);
+    const atkTotal = Math.round((atkProf.picked + atkBonus) * 10) / 10;
+
+    // 무기 주사위 파싱
+    const dMatch = diceRaw.match(/^(\d+)[dD](\d+)$/);
+    if (!dMatch) return interaction.reply({ content: '❌ 주사위 형식 오류. 예) `1d6`', ephemeral: true });
+    const weaponCount = parseInt(dMatch[1]), weaponSides = parseInt(dMatch[2]);
+
     const npcMatch = targetRaw.match(/^(\d+)$/);
     const npcs = loadJSON(NPC_FILE);
 
-    let dmgText = '', hpText = '', targetName = targetRaw;
-    let hitSuccess = true;
+    let targetName = targetRaw;
+    let defProf = null, defBonus = 0, defTotal = 0, defStatLabel = '';
+    let dmgText = '', hpText = '', resultText = '';
+    let hitSuccess = false;
 
     if (npcMatch) {
       const nid = npcMatch[1];
@@ -1446,38 +1500,67 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!npc) return interaction.reply({ content: `❌ NPC ID \`${nid}\`를 찾을 수 없습니다.`, ephemeral: true });
       targetName = `[NPC-${nid}] ${npc.name}`;
 
-      // 방어값과 비교
-      const defVal = 10 + Math.floor((npc.stats?.체력 ?? 0) / 10);
-      hitSuccess   = atkTotal >= defVal;
+      const defStat = npc.stats?.체력 ?? 0;
+      defStatLabel  = `체력 ${defStat}`;
+      defBonus      = calcBonus(defStat);
+      defProf       = rollProficiency(defStat);
+      defTotal      = Math.round((defProf.picked + defBonus) * 10) / 10;
+
+      const gap = Math.round((atkTotal - defTotal) * 10) / 10;
+      hitSuccess = gap > 0;
 
       if (hitSuccess) {
-        // 데미지 굴림
-        const dMatch = diceRaw.match(/^(\d+)[dD](\d+)$/);
-        if (!dMatch) return interaction.reply({ content: '❌ 주사위 형식 오류. 예) `1d6`', ephemeral: true });
-        const dmgRolls = rollDice(parseInt(dMatch[1]), parseInt(dMatch[2]));
-        const dmgBonus = Math.floor(stat / 10);
-        const dmgTotal = dmgRolls.reduce((a,b) => a+b, 0) + dmgBonus;
-        if (!npc.hp) npc.hp = { current: (npc.stats?.체력 ?? 0) * 10, max: (npc.stats?.체력 ?? 0) * 10 };
+        // 폭발 무기 주사위
+        const weaponRolls = rollExploding(weaponCount, weaponSides);
+        const exploded    = weaponRolls.length > weaponCount;
+        const weaponSum   = weaponRolls.reduce((a,b)=>a+b, 0);
+
+        // 크리티컬 배수
+        const natCrit  = atkProf.picked === 20;
+        const fumble   = defProf.picked === 1;
+        let multiplier = 1;
+        const critTags = [];
+        if (natCrit) { multiplier *= 3; critTags.push('🎯 **Natural 20** ×3'); }
+        if (fumble)  { multiplier *= 2; critTags.push('💀 **방어 Fumble** ×2'); }
+
+        const rawDmg = (weaponSum + gap) * multiplier;
+        const finalDmg = Math.max(0, Math.round(rawDmg));
+
+        if (!npc.hp) npc.hp = { current: npcMaxHP(npc), max: npcMaxHP(npc) };
         const before = npc.hp.current;
-        npc.hp.current = Math.max(0, npc.hp.current - dmgTotal);
+        npc.hp.current = Math.max(0, npc.hp.current - finalDmg);
         saveJSON(NPC_FILE, npcs);
-        dmgText = `💥 데미지: ${dmgRolls.join('+')} + ${dmgBonus} = **${dmgTotal}**`;
+
+        const explodeMark = exploded ? ' 💥 폭발!' : '';
+        const multiLine   = multiplier > 1 ? `\n${critTags.join(' ')} → 배수 **×${multiplier}**` : '';
+        dmgText = `🎲 무기 ${diceRaw}${explodeMark}: ${weaponRolls.join('+')} = **${weaponSum}**\n` +
+                  `📐 명중 격차: **${gap}**\n` +
+                  `💥 최종: (${weaponSum} + ${gap})${multiplier>1?` × ${multiplier}`:''} = **${finalDmg}**${multiLine}`;
         hpText  = `❤️ ${npc.name}: **${before}** → **${npc.hp.current}** / ${npc.hp.max}\n${makeHPBar(npc.hp.current, npc.hp.max)}`;
-        if (npc.hp.current === 0) hpText += '\n💀 **전투 불능!**';
+        if (npc.hp.current === 0) hpText += '\n☠️ **전투 불능!**';
+        resultText = '🩸 **명중!**';
       } else {
-        dmgText = `🛡️ 방어값(${defVal})에 막혔습니다. (공격: ${atkTotal})`;
+        resultText = `🛡️ **빗나감** (격차: ${gap})`;
       }
+    } else {
+      resultText = '⚠️ 대상이 NPC ID가 아닙니다 — 방어 판정은 GM이 수동 처리해주세요.';
     }
 
     const embed = new EmbedBuilder()
       .setTitle(`⚔️ ${char.nickname} → ${targetName}`)
       .setColor(hitSuccess ? 0xE74C3C : 0x95A5A6)
       .addFields(
-        { name: '🎲 공격 판정', value: `d20(**${atkRoll}**) + ${atkBonus} = **${atkTotal}**`, inline: false },
+        { name: `🗡️ 공격 (d20×${atkProf.count})`, value: `[${fmtRolls(atkProf.rolls, atkProf.picked)}] → **${atkProf.picked}** + ${fmtBonus(atkBonus)} (${statName} ${atkStat}/10) = **${atkTotal}**`, inline: false },
       );
-    if (dmgText) embed.addFields({ name: '결과', value: dmgText, inline: false });
+    if (defProf) embed.addFields({
+      name: `🛡️ 방어 (d20×${defProf.count})`,
+      value: `[${fmtRolls(defProf.rolls, defProf.picked)}] → **${defProf.picked}** + ${fmtBonus(defBonus)} (${defStatLabel}/10) = **${defTotal}**`,
+      inline: false,
+    });
+    embed.addFields({ name: '📊 결과', value: resultText, inline: false });
+    if (dmgText) embed.addFields({ name: '💥 데미지', value: dmgText, inline: false });
     if (hpText)  embed.addFields({ name: 'HP 변화', value: hpText, inline: false });
-    embed.setFooter({ text: `${statName} ${stat} 사용` });
+    embed.setFooter({ text: `${statName} ${atkStat} 사용` });
 
     await interaction.reply({ embeds: [embed] });
 
@@ -1699,7 +1782,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },
         { name: '🎯 판정',      value: '`/판정 일반` `/판정 공격` `/판정 방어` `/판정 회피` `/판정 데미지`', inline: false },
         { name: '🤖 AI 판정',   value: ['`/ai판정 행동:[내용]` — AI가 캐릭터 시트·스킬·특성 설명을 읽고 복합 판정 자동 계산', '> 스킬이 능력치 2개를 쓰거나 특성 조건이 복잡해도 AI가 유연하게 처리'].join('\n'), inline: false },
-        { name: '⚔️ 전투',      value: ['`/전투시작` 🔒 — 이니셔티브 자동 굴림 & 턴 순서 정렬', '`/다음턴` 🔒 — 다음 턴 (5분 무응답 시 자동 스킵)', '`/전투현황` — 현재 HP 대시보드', '`/전투종료` 🔒', '`/공격 [NPC ID] [능력치]` — 공격 판정+데미지+HP 자동 감소'].join('\n'), inline: false },
+        { name: '⚔️ 전투 (Deadly Strike)', value: ['`/전투시작` 🔒 — 이니셔티브 자동 굴림 & 턴 순서 정렬', '`/다음턴` 🔒 — 다음 턴 (10분 무응답 시 자동 스킵)', '`/전투현황` — 현재 HP 대시보드', '`/전투종료` 🔒', '`/공격 [NPC ID] [능력치] [주사위]` — 명중 격차 + 폭발 무기 + 크리티컬 배수 (Nat20 ×3 / Fumble ×2)'].join('\n'), inline: false },
         { name: '🌄 씬',        value: ['`/씬설정` 🔒 — 배경 설정 + 특성 자동 트리거 알림', '`/씬현황` `/씬초기화` 🔒'].join('\n'), inline: false },
         { name: '📋 행동 선언', value: ['`/행동선언 [행동]` — 다음 턴 행동 미리 제출 (8명 진행 가속)', '`/행동확인` 🔒 `/행동초기화` 🔒'].join('\n'), inline: false },
         { name: '🌀 이세계',    value: '`/이세계전이` — 93가지 사망 원인 랜덤 (1d93)',     inline: false },
@@ -1731,11 +1814,11 @@ function buildCharContext(char) {
   lines.push(`캐릭터명: ${char.nickname} | 종족: ${char.race || '미등록'} | 직업: ${char.job || '미등록'} | 소속: ${char.affiliation || '미등록'}`);
   lines.push(`레벨: ${char.level} | HP: ${char.hp?.current ?? 0} / ${char.hp?.max ?? 0} | 운명점: ${char.fatePoints?.current}/${char.fatePoints?.max}`);
 
-  lines.push('\n[기본 스탯] (각 스탯의 판정 보너스 = ⌊스탯값/10⌋)');
+  lines.push('\n[기본 스탯] (각 스탯의 판정 보너스 = 스탯값/10, 소수점 1자리)');
   for (const [k, v] of Object.entries(char.stats ?? {})) {
     const temp  = char.tempStats?.[k] ?? 0;
     const eff   = v === Infinity ? Infinity : v + temp;
-    const bonus = eff === Infinity ? '∞' : Math.floor(eff / 10);
+    const bonus = fmtBonus(calcBonus(eff));
     const tempStr = temp !== 0 ? ` (기본 ${v} + 임시 ${temp >= 0 ? '+' : ''}${temp})` : '';
     lines.push(`  ${k}: ${eff === Infinity ? '∞' : eff}${tempStr} → 판정보너스 +${bonus}`);
   }
@@ -1745,7 +1828,7 @@ function buildCharContext(char) {
     for (const [k, v] of Object.entries(char.specialStats)) {
       const temp  = char.tempStats?.[k] ?? 0;
       const eff   = v === Infinity ? Infinity : v + temp;
-      const bonus = eff === Infinity ? '∞' : Math.floor(eff / 10);
+      const bonus = fmtBonus(calcBonus(eff));
       lines.push(`  ${k}: ${eff === Infinity ? '∞' : eff} → 판정보너스 +${bonus}`);
     }
   }
@@ -1791,18 +1874,25 @@ async function callAIJudge(apiKey, char, action, d20Roll, sceneBgs) {
 
   const systemPrompt = `당신은 TRPG 판정 계산 전문 AI입니다. 플레이어의 캐릭터 시트, 스킬/특성 설명, 현재 씬 배경을 분석하여 판정을 정확하게 계산합니다.
 
-## 게임 규칙 (반드시 준수)
-- 기본 판정: 주어진 d20 결과 + ⌊능력치/10⌋ (소수점 버림)
+## 게임 규칙 (Deadly Strike System — 반드시 준수)
+- 보정치: 능력치 / 10 (소수점 첫째 자리까지, 예: 능력치 15 → 1.5)
+- HP: 체력 × 5
+- 기본 판정: d20(숙련도 스택 최댓값) + 보정치
+- 숙련도 스택: 능력치 20당 d20 +1, 가장 높은 값 채택 (예: 능력치 40 → d20 2개 → 최댓값)
 - 스킬 설명에 능력치가 2개 이상 명시된 경우: 각 보너스를 모두 합산
-- 방어 판정: 10 + ⌊체력/10⌋ (주사위 없음, d20 불필요)
-- 회피 판정: 10 + ⌊민첩/10⌋ (주사위 없음)
-- 데미지: 별도 무기 주사위 + ⌊능력치/10⌋
+- 방어 판정: d20(숙련도 스택 최댓값) + (체력/10)
+- 회피 판정: d20(숙련도 스택 최댓값) + (민첩/10)
+- 데미지: 무기 주사위(폭발) + 보정치
+- 폭발 주사위: 무기 주사위에서 최댓값이 나오면 한 번 더 굴려 합산 (연속 가능)
 - 임시 스탯 반영: 이미 캐릭터 시트에 합산되어 있음
 - 특성은 씬 배경 또는 행동 상황에 따라 활성화 여부 판단
 
-## 크리티컬/퍼블 처리
-- d20 = 20: 크리티컬 성공 — 보너스와 무관하게 최상의 결과
-- d20 = 1: 퍼블 — 보너스와 무관하게 최악의 결과
+## 크리티컬/퍼블 처리 (배수 누적)
+- 공격자 채택 d20 = 20 (Natural 20): 최종 데미지 ×3
+- 방어자 채택 d20 = 1 (Fumble): 최종 데미지 ×2
+- 두 조건이 겹치면 ×6
+- 명중 격차(Gap) = ATK - DEF. Gap > 0이면 명중, 데미지 = (무기주사위 + Gap) × 크리티컬 배수
+- Gap ≤ 0이면 빗나감 (데미지 0)
 
 ## 응답 형식
 반드시 아래 JSON만 출력하세요. 추가 텍스트, 마크다운 코드블록, 설명 일절 없이 JSON 객체만:

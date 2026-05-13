@@ -7,6 +7,7 @@
 const {
   Client, GatewayIntentBits, EmbedBuilder, Events,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
+  ButtonBuilder, ButtonStyle,
 } = require('discord.js');
 const fs   = require('fs');
 const path = require('path');
@@ -172,7 +173,11 @@ const client = new Client({
 // ───────────────────────────────────────────
 //  파일 I/O
 // ───────────────────────────────────────────
-function loadJSON(fp)       { return fs.existsSync(fp) ? JSON.parse(fs.readFileSync(fp, 'utf-8')) : {}; }
+function loadJSON(fp) {
+  if (!fs.existsSync(fp)) return {};
+  try { return JSON.parse(fs.readFileSync(fp, 'utf-8')); }
+  catch (e) { console.error(`⚠️ 손상된 JSON 파일: ${fp}`, e); return {}; }
+}
 function saveJSON(fp, data) { fs.writeFileSync(fp, JSON.stringify(data, null, 2), 'utf-8'); }
 
 // ───────────────────────────────────────────
@@ -446,6 +451,60 @@ const pendingNPCs  = new Map(); // userId → partial npc data
 //  인터랙션 핸들러
 // ───────────────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
+ try {
+
+  // ══════════════════════════════
+  //  BUTTON 클릭 처리 — 모달 체이닝용
+  // ══════════════════════════════
+  if (interaction.isButton()) {
+    const uid = interaction.user.id;
+
+    if (interaction.customId === 'char_next_btn') {
+      if (!pendingChars.has(uid)) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/상태등록`을 다시 시도해주세요.', ephemeral: true });
+      const modal2 = new ModalBuilder()
+        .setCustomId('char_modal_2')
+        .setTitle('캐릭터 등록 (2/2) — 스킬·특성·특수스탯');
+      modal2.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('skills').setLabel('스킬 (쉼표 구분, 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('traits').setLabel('특성 (쉼표 구분, 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('specialStats').setLabel('특수스탯 (형식: 이름:값, 이름:값 / 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
+        ),
+      );
+      return interaction.showModal(modal2);
+    }
+
+    if (interaction.customId === 'npc_next_btn') {
+      if (!pendingNPCs.has(uid)) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/npc등록`을 다시 시도해주세요.', ephemeral: true });
+      const modal2 = new ModalBuilder()
+        .setCustomId('npc_modal_2')
+        .setTitle('NPC 등록 (2/2) — 스탯·스킬·특성');
+      modal2.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('stats').setLabel('기본스탯 (체력 근력 민첩 지능 매력 감각 정신력)').setStyle(TextInputStyle.Short).setPlaceholder('예) 9 8 10 7 5 6 8').setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('specialStats').setLabel('특수스탯 (이름:값, 이름:값 / 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('skills').setLabel('스킬 (쉼표 구분, 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('traits').setLabel('특성 (쉼표 구분, 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('memo').setLabel('메모/설명 (없으면 빈칸)').setStyle(TextInputStyle.Paragraph).setRequired(false)
+        ),
+      );
+      return interaction.showModal(modal2);
+    }
+
+    return; // 알 수 없는 버튼
+  }
 
   // ══════════════════════════════
   //  MODAL 제출 처리
@@ -468,22 +527,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       pendingChars.set(uid, { nickname, race, job, affiliation, stats });
 
-      const modal2 = new ModalBuilder()
-        .setCustomId('char_modal_2')
-        .setTitle('캐릭터 등록 (2/2) — 스킬·특성·특수스탯');
-
-      modal2.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('skills').setLabel('스킬 (쉼표 구분, 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('traits').setLabel('특성 (쉼표 구분, 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('specialStats').setLabel('특수스탯 (형식: 이름:값, 이름:값 / 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
-        ),
-      );
-      return interaction.showModal(modal2);
+      const nextBtn = new ButtonBuilder()
+        .setCustomId('char_next_btn')
+        .setLabel('다음 단계로 (2/2) →')
+        .setStyle(ButtonStyle.Primary);
+      return interaction.reply({
+        content: `✅ 1단계 입력 완료: **${nickname}**\n아래 버튼을 눌러 2단계(스킬·특성·특수스탯)로 진행해주세요.`,
+        components: [new ActionRowBuilder().addComponents(nextBtn)],
+        ephemeral: true,
+      });
     }
 
     // ── 캐릭터 등록 2단계 ──
@@ -548,28 +600,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       pendingNPCs.set(uid, { name, race, job, affiliation, hasLevel, level: hasLevel ? level : 1 });
 
-      const modal2 = new ModalBuilder()
-        .setCustomId('npc_modal_2')
-        .setTitle('NPC 등록 (2/2) — 스탯·스킬·특성');
-
-      modal2.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('stats').setLabel('기본스탯 (체력 근력 민첩 지능 매력 감각 정신력)').setStyle(TextInputStyle.Short).setPlaceholder('예) 9 8 10 7 5 6 8').setRequired(true)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('specialStats').setLabel('특수스탯 (이름:값, 이름:값 / 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('skills').setLabel('스킬 (쉼표 구분, 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('traits').setLabel('특성 (쉼표 구분, 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('memo').setLabel('메모/설명 (없으면 빈칸)').setStyle(TextInputStyle.Paragraph).setRequired(false)
-        ),
-      );
-      return interaction.showModal(modal2);
+      const nextBtn = new ButtonBuilder()
+        .setCustomId('npc_next_btn')
+        .setLabel('다음 단계로 (2/2) →')
+        .setStyle(ButtonStyle.Primary);
+      return interaction.reply({
+        content: `✅ 1단계 입력 완료: **${name}**\n아래 버튼을 눌러 2단계(스탯·스킬·특성)로 진행해주세요.`,
+        components: [new ActionRowBuilder().addComponents(nextBtn)],
+        ephemeral: true,
+      });
     }
 
     // ── NPC 등록 2단계 ──
@@ -1672,6 +1711,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setFooter({ text: '🔒 = GM 역할 필요' });
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
+ } catch (err) {
+  console.error('❌ 인터랙션 처리 중 오류:', err);
+  const payload = { content: '❌ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.', ephemeral: true };
+  try {
+    if (interaction.deferred || interaction.replied) await interaction.followUp(payload);
+    else await interaction.reply(payload);
+  } catch (e) { console.error('에러 응답 전송 실패:', e); }
+ }
 });
 
 // ═══════════════════════════════════════════════════════════════

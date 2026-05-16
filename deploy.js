@@ -2,8 +2,8 @@ const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 const commands = [
   // ─── 주사위 ───
-  new SlashCommandBuilder().setName('roll').setDescription('주사위를 굴립니다')
-    .addStringOption(o => o.setName('dice').setDescription('형식: xdy  예) 2d6').setRequired(true)),
+  new SlashCommandBuilder().setName('roll').setDescription('주사위를 굴립니다 (식 표현식 지원)')
+    .addStringOption(o => o.setName('dice').setDescription('예) 2d6, 1d20+1d10, 2d6+5-1d4').setRequired(true)),
 
   // ─── 상태창 ───
   new SlashCommandBuilder().setName('상태등록').setDescription('캐릭터를 등록합니다 (팝업 창으로 입력)'),

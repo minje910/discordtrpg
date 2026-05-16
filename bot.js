@@ -288,23 +288,23 @@ function effStat(char, s) {
 }
 function calcMaxHP(char) {
   const hp = effStat(char, '체력');
-  return hp === Infinity ? Infinity : hp * 5;          // Deadly Strike: 체력 × 5
+  return hp === Infinity ? Infinity : hp * 4;          // 내추럴 하이 스피드: 체력 × 4
 }
 function npcMaxHP(npc) {
   const hp = npc?.stats?.체력 ?? 0;
-  return hp * 5;
+  return hp * 4;
 }
 function requiredExp(lv)   { return lv * 10; }
 function rollDice(n, s)    { return Array.from({ length: n }, () => Math.floor(Math.random() * s) + 1); }
 
-// 보정치: 능력치 / 10, 소수점 첫째 자리까지
+// 보정치: 능력치 / 2 (소수점 1자리까지 표현. 정수면 정수, .5면 .5)
 function calcBonus(stat) {
   if (stat === Infinity) return Infinity;
-  return Math.round((stat / 10) * 10) / 10;
+  return Math.round((stat / 2) * 10) / 10;
 }
 function fmtBonus(b) {
   if (b === Infinity) return '∞';
-  return Number.isInteger(b) ? `${b}.0` : `${b}`;
+  return Number.isInteger(b) ? `${b}` : `${b}`;
 }
 
 // 숙련도 스택: 능력치 20당 d20 +1, 최댓값 선택 (최소 1개)
@@ -326,6 +326,47 @@ function rollExploding(count, sides) {
     pending = rolls.filter(r => r === sides).length;
   }
   return all;
+}
+
+// 주사위 식 파서: "1d20 + 1d10 + 5", "2d6-3" 등
+// 토큰: XdY 또는 정수, 연결자 +/-
+function evalRollExpression(expr) {
+  const clean = (expr ?? '').replace(/\s+/g, '');
+  if (!clean) throw new Error('빈 식입니다.');
+  // 첫 토큰 부호 없을 수 있음 → 앞에 +를 붙여 처리 단순화
+  const norm = clean.startsWith('+') || clean.startsWith('-') ? clean : '+' + clean;
+  const tokenRe = /([+-])(\d+[dD]\d+|\d+)/g;
+  const parts = [];
+  let total = 0, lastIdx = 0, m;
+  while ((m = tokenRe.exec(norm)) !== null) {
+    if (m.index !== lastIdx) throw new Error(`알 수 없는 구문: \`${norm.slice(lastIdx, m.index) || norm}\``);
+    lastIdx = m.index + m[0].length;
+    const sign = m[1] === '-' ? -1 : 1;
+    const body = m[2];
+    const d = body.match(/^(\d+)[dD](\d+)$/);
+    if (d) {
+      const c = parseInt(d[1], 10), s = parseInt(d[2], 10);
+      if (c < 1 || c > 100)  throw new Error('주사위 개수는 1~100');
+      if (s < 2 || s > 1000) throw new Error('면체 수는 2~1000');
+      const rolls = rollDice(c, s);
+      const sum   = rolls.reduce((a,b)=>a+b, 0);
+      total += sign * sum;
+      const detail = rolls.map(r => r === s ? `**${r}**` : `${r}`).join('+');
+      parts.push({ sign, label: `${c}d${s}`, detail: `[${detail}]`, value: sum });
+    } else {
+      const n = parseInt(body, 10);
+      total += sign * n;
+      parts.push({ sign, label: `${n}`, detail: '', value: n });
+    }
+  }
+  if (lastIdx !== norm.length) throw new Error(`알 수 없는 구문: \`${norm.slice(lastIdx)}\``);
+  if (parts.length === 0) throw new Error('식을 해석할 수 없습니다.');
+  // 표시용 문자열 조립
+  const display = parts.map((p, i) => {
+    const op = p.sign === -1 ? ' − ' : (i === 0 ? '' : ' + ');
+    return `${op}${p.label}${p.detail ? p.detail : ''}`;
+  }).join('');
+  return { total, display };
 }
 
 function makeHPBar(cur, max) {
@@ -666,7 +707,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const specialStats = parseSpecialStats(specialRaw);
-      const maxHP        = (stats['체력'] ?? 0) * 5;
+      const maxHP        = (stats['체력'] ?? 0) * 4;
       const npc = {
         ...partial,
         stats,
@@ -698,23 +739,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const { commandName: cmd, member } = interaction;
 
-  // ── 주사위 ──────────────────────────────────────────
+  // ── 주사위 (식 표현식 지원: 1d20 + 1d10 + 5) ───────
   if (cmd === 'roll') {
     const diceStr = interaction.options.getString('dice');
-    const match   = diceStr.match(/^(\d+)[dD](\d+)$/);
-    if (!match) return interaction.reply({ content: '❌ 형식 오류. 예) `2d6`', ephemeral: true });
-    const count = parseInt(match[1], 10), sides = parseInt(match[2], 10);
-    if (count < 1 || count > 100)  return interaction.reply({ content: '❌ 주사위 개수는 1~100', ephemeral: true });
-    if (sides < 2 || sides > 1000) return interaction.reply({ content: '❌ 면체 수는 2~1000',   ephemeral: true });
-    const rolls  = rollDice(count, sides);
-    const total  = rolls.reduce((a, b) => a + b, 0);
-    const detail = rolls.map(r => r === sides ? `**${r}**` : `${r}`).join(' + ');
+    let result;
+    try { result = evalRollExpression(diceStr); }
+    catch (e) {
+      return interaction.reply({ content: `❌ 형식 오류: ${e.message}\n예) \`2d6\`, \`1d20 + 1d10\`, \`2d6 + 5 - 1d4\``, ephemeral: true });
+    }
     return interaction.reply({ embeds: [
       new EmbedBuilder().setTitle('🎲 주사위 결과').setColor(0x9B59B6)
         .addFields(
-          { name: '굴린 주사위', value: `\`${count}d${sides}\``, inline: true  },
-          { name: '각 결과',     value: detail,                   inline: false },
-          { name: '합계',        value: `**${total}**`,           inline: true  },
+          { name: '식',     value: `\`${diceStr}\``,        inline: false },
+          { name: '굴림',   value: result.display || '—',   inline: false },
+          { name: '합계',   value: `**${result.total}**`,    inline: true  },
         ).setFooter({ text: `${member.displayName}의 굴림` })
     ]});
   }
@@ -917,13 +955,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const { rolls, picked, count } = rollProficiency(stat);
       const total = Math.round((picked + bonus) * 10) / 10;
       embed = new EmbedBuilder().setTitle('🛡️ 방어 판정').setColor(0x3498DB)
-        .setDescription(`**결과: ${total}**\nd20×${count} → [${fmtRolls(rolls, picked)}] → **${picked}** + (체력 ${stat}/10 = ${fmtBonus(bonus)})`);
+        .setDescription(`**결과: ${total}**\nd20×${count} → [${fmtRolls(rolls, picked)}] → **${picked}** + (체력 ${stat}/2 = ${fmtBonus(bonus)})`);
     } else if (sub === '회피') {
       const stat = effStat(char, '민첩'), bonus = calcBonus(stat);
       const { rolls, picked, count } = rollProficiency(stat);
       const total = Math.round((picked + bonus) * 10) / 10;
       embed = new EmbedBuilder().setTitle('💨 회피 판정').setColor(0x1ABC9C)
-        .setDescription(`**결과: ${total}**\nd20×${count} → [${fmtRolls(rolls, picked)}] → **${picked}** + (민첩 ${stat}/10 = ${fmtBonus(bonus)})`);
+        .setDescription(`**결과: ${total}**\nd20×${count} → [${fmtRolls(rolls, picked)}] → **${picked}** + (민첩 ${stat}/2 = ${fmtBonus(bonus)})`);
     } else if (sub === '일반' || sub === '공격') {
       const statName = interaction.options.getString('능력치');
       const stat = effStat(char, statName);
@@ -936,7 +974,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setTitle(sub === '공격' ? '⚔️ 공격 판정' : '🎯 일반 판정').setColor(0xE67E22)
         .addFields(
           { name: `🎲 d20 × ${count} (숙련도 스택)`, value: `[${fmtRolls(rolls, picked)}] → **${picked}**`, inline: false },
-          { name: '➕ 보너스', value: `${fmtBonus(bonus)} (${statName} ${stat}/10)`, inline: true },
+          { name: '➕ 보너스', value: `${fmtBonus(bonus)} (${statName} ${stat}/2)`, inline: true },
           { name: '📊 합계',   value: `**${total}**`,                inline: true },
         );
     } else if (sub === '데미지') {
@@ -944,16 +982,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const diceStr  = interaction.options.getString('주사위');
       const match    = diceStr.match(/^(\d+)[dD](\d+)$/);
       if (!match) return interaction.reply({ content: '❌ 주사위 형식 오류. 예) `2d6`', ephemeral: true });
-      const stat = effStat(char, statName), bonus = calcBonus(stat);
+      const stat = effStat(char, statName);
       const baseCount = parseInt(match[1]), sides = parseInt(match[2]);
       const rolls = rollExploding(baseCount, sides);
       const exploded = rolls.length > baseCount;
       const dtotal = rolls.reduce((a,b) => a+b, 0);
-      const final = Math.round((dtotal + bonus) * 10) / 10;
+      const final = dtotal + stat;     // 무기 + 능력치 원본
       embed = new EmbedBuilder().setTitle('💥 데미지 판정').setColor(0xE74C3C)
         .addFields(
           { name: `🎲 ${diceStr}${exploded ? ' 💥 폭발!' : ''}`, value: `${rolls.join(' + ')} = **${dtotal}**`,      inline: false },
-          { name: '➕ 보너스',     value: `${fmtBonus(bonus)} (${statName} ${stat}/10)`,         inline: true  },
+          { name: '➕ 능력치 원본', value: `+${stat} (${statName})`,         inline: true  },
           { name: '💥 총 데미지',  value: `**${final}**`,                    inline: true  },
         );
     }
@@ -1122,7 +1160,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!statName || isNaN(statVal)) return interaction.reply({ content: '❌ 형식: `스탯이름 숫자`', ephemeral: true });
       npc.stats = npc.stats || {};
       npc.stats[statName] = statVal;
-      if (statName === '체력') { npc.hp = npc.hp || {}; npc.hp.max = statVal * 5; npc.hp.current = Math.min(npc.hp.current ?? npc.hp.max, npc.hp.max); }
+      if (statName === '체력') { npc.hp = npc.hp || {}; npc.hp.max = statVal * 4; npc.hp.current = Math.min(npc.hp.current ?? npc.hp.max, npc.hp.max); }
       resultMsg = `📈 스탯 **${statName}** → **${statVal}**`;
     } else if (field === '특수스탯') {
       const parts = rawVal.trim().split(/\s+/);
@@ -1507,7 +1545,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       defTotal      = Math.round((defProf.picked + defBonus) * 10) / 10;
 
       const gap = Math.round((atkTotal - defTotal) * 10) / 10;
-      hitSuccess = gap > 0;
+      hitSuccess = gap >= 0;          // 0 이상이면 명중
 
       if (hitSuccess) {
         // 폭발 무기 주사위
@@ -1515,15 +1553,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const exploded    = weaponRolls.length > weaponCount;
         const weaponSum   = weaponRolls.reduce((a,b)=>a+b, 0);
 
-        // 크리티컬 배수
+        // 크리티컬 배수 (공격 d20 = 20만, ×2)
         const natCrit  = atkProf.picked === 20;
-        const fumble   = defProf.picked === 1;
-        let multiplier = 1;
-        const critTags = [];
-        if (natCrit) { multiplier *= 3; critTags.push('🎯 **Natural 20** ×3'); }
-        if (fumble)  { multiplier *= 2; critTags.push('💀 **방어 Fumble** ×2'); }
+        const multiplier = natCrit ? 2 : 1;
 
-        const rawDmg = (weaponSum + gap) * multiplier;
+        // 데미지 = (무기 + 능력치 원본 + 격차) × 배수
+        const baseDmg  = weaponSum + atkStat + gap;
+        const rawDmg   = baseDmg * multiplier;
         const finalDmg = Math.max(0, Math.round(rawDmg));
 
         if (!npc.hp) npc.hp = { current: npcMaxHP(npc), max: npcMaxHP(npc) };
@@ -1532,13 +1568,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         saveJSON(NPC_FILE, npcs);
 
         const explodeMark = exploded ? ' 💥 폭발!' : '';
-        const multiLine   = multiplier > 1 ? `\n${critTags.join(' ')} → 배수 **×${multiplier}**` : '';
+        const critLine    = natCrit ? `\n🎯 **Natural 20!** 최종 데미지 ×2` : '';
         dmgText = `🎲 무기 ${diceRaw}${explodeMark}: ${weaponRolls.join('+')} = **${weaponSum}**\n` +
                   `📐 명중 격차: **${gap}**\n` +
-                  `💥 최종: (${weaponSum} + ${gap})${multiplier>1?` × ${multiplier}`:''} = **${finalDmg}**${multiLine}`;
+                  `💥 기본: ${weaponSum} + ${atkStat}(${statName} 원본) + ${gap}(격차) = **${baseDmg}**${critLine}\n` +
+                  (multiplier > 1 ? `🔥 최종: ${baseDmg} × ${multiplier} = **${finalDmg}**` : `🔥 최종 데미지: **${finalDmg}**`);
         hpText  = `❤️ ${npc.name}: **${before}** → **${npc.hp.current}** / ${npc.hp.max}\n${makeHPBar(npc.hp.current, npc.hp.max)}`;
         if (npc.hp.current === 0) hpText += '\n☠️ **전투 불능!**';
-        resultText = '🩸 **명중!**';
+        resultText = '🩸 **명중!** (성공 시 연속 공격 가능)';
       } else {
         resultText = `🛡️ **빗나감** (격차: ${gap})`;
       }
@@ -1550,11 +1587,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setTitle(`⚔️ ${char.nickname} → ${targetName}`)
       .setColor(hitSuccess ? 0xE74C3C : 0x95A5A6)
       .addFields(
-        { name: `🗡️ 공격 (d20×${atkProf.count})`, value: `[${fmtRolls(atkProf.rolls, atkProf.picked)}] → **${atkProf.picked}** + ${fmtBonus(atkBonus)} (${statName} ${atkStat}/10) = **${atkTotal}**`, inline: false },
+        { name: `🗡️ 공격 (d20×${atkProf.count})`, value: `[${fmtRolls(atkProf.rolls, atkProf.picked)}] → **${atkProf.picked}** + ${fmtBonus(atkBonus)} (${statName} ${atkStat}/2) = **${atkTotal}**`, inline: false },
       );
     if (defProf) embed.addFields({
       name: `🛡️ 방어 (d20×${defProf.count})`,
-      value: `[${fmtRolls(defProf.rolls, defProf.picked)}] → **${defProf.picked}** + ${fmtBonus(defBonus)} (${defStatLabel}/10) = **${defTotal}**`,
+      value: `[${fmtRolls(defProf.rolls, defProf.picked)}] → **${defProf.picked}** + ${fmtBonus(defBonus)} (${defStatLabel}/2) = **${defTotal}**`,
       inline: false,
     });
     embed.addFields({ name: '📊 결과', value: resultText, inline: false });
@@ -1776,13 +1813,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const embed = new EmbedBuilder()
       .setTitle('📖 TRPG 봇 명령어 목록').setColor(0x3498DB)
       .addFields(
-        { name: '🎲 주사위',    value: '`/roll` — xdy 형식',                         inline: false },
+        { name: '🎲 주사위',    value: '`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-)', inline: false },
         { name: '📊 캐릭터',    value: ['`/상태등록` — 팝업 창으로 캐릭터 생성 (채팅 오염 없음)', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
         { name: '⚔️ 스킬·특성·특수스탯', value: ['`/스킬추가` `/스킬제거` `/특성추가` `/특성제거`', '`/특수스탯추가` `/특수스탯제거`'].join('\n'), inline: false },
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },
         { name: '🎯 판정',      value: '`/판정 일반` `/판정 공격` `/판정 방어` `/판정 회피` `/판정 데미지`', inline: false },
         { name: '🤖 AI 판정',   value: ['`/ai판정 행동:[내용]` — AI가 캐릭터 시트·스킬·특성 설명을 읽고 복합 판정 자동 계산', '> 스킬이 능력치 2개를 쓰거나 특성 조건이 복잡해도 AI가 유연하게 처리'].join('\n'), inline: false },
-        { name: '⚔️ 전투 (Deadly Strike)', value: ['`/전투시작` 🔒 — 이니셔티브 자동 굴림 & 턴 순서 정렬', '`/다음턴` 🔒 — 다음 턴 (10분 무응답 시 자동 스킵)', '`/전투현황` — 현재 HP 대시보드', '`/전투종료` 🔒', '`/공격 [NPC ID] [능력치] [주사위]` — 명중 격차 + 폭발 무기 + 크리티컬 배수 (Nat20 ×3 / Fumble ×2)'].join('\n'), inline: false },
+        { name: '⚔️ 전투 (내추럴 하이 스피드)', value: ['`/전투시작` 🔒 — 이니셔티브 자동 굴림 & 턴 순서 정렬', '`/다음턴` 🔒 — 다음 턴 (10분 무응답 시 자동 스킵)', '`/전투현황` — 현재 HP 대시보드', '`/전투종료` 🔒', '`/공격 [NPC ID] [능력치] [주사위]` — 명중 격차 + 폭발 무기 + Nat20 ×2. 명중 시 연속 공격 가능'].join('\n'), inline: false },
         { name: '🌄 씬',        value: ['`/씬설정` 🔒 — 배경 설정 + 특성 자동 트리거 알림', '`/씬현황` `/씬초기화` 🔒'].join('\n'), inline: false },
         { name: '📋 행동 선언', value: ['`/행동선언 [행동]` — 다음 턴 행동 미리 제출 (8명 진행 가속)', '`/행동확인` 🔒 `/행동초기화` 🔒'].join('\n'), inline: false },
         { name: '🌀 이세계',    value: '`/이세계전이` — 93가지 사망 원인 랜덤 (1d93)',     inline: false },
@@ -1814,7 +1851,7 @@ function buildCharContext(char) {
   lines.push(`캐릭터명: ${char.nickname} | 종족: ${char.race || '미등록'} | 직업: ${char.job || '미등록'} | 소속: ${char.affiliation || '미등록'}`);
   lines.push(`레벨: ${char.level} | HP: ${char.hp?.current ?? 0} / ${char.hp?.max ?? 0} | 운명점: ${char.fatePoints?.current}/${char.fatePoints?.max}`);
 
-  lines.push('\n[기본 스탯] (각 스탯의 판정 보너스 = 스탯값/10, 소수점 1자리)');
+  lines.push('\n[기본 스탯] (각 스탯의 판정 보너스 = 스탯값/2)');
   for (const [k, v] of Object.entries(char.stats ?? {})) {
     const temp  = char.tempStats?.[k] ?? 0;
     const eff   = v === Infinity ? Infinity : v + temp;
@@ -1874,25 +1911,24 @@ async function callAIJudge(apiKey, char, action, d20Roll, sceneBgs) {
 
   const systemPrompt = `당신은 TRPG 판정 계산 전문 AI입니다. 플레이어의 캐릭터 시트, 스킬/특성 설명, 현재 씬 배경을 분석하여 판정을 정확하게 계산합니다.
 
-## 게임 규칙 (Deadly Strike System — 반드시 준수)
-- 보정치: 능력치 / 10 (소수점 첫째 자리까지, 예: 능력치 15 → 1.5)
-- HP: 체력 × 5
+## 게임 규칙 (Natural High Speed — 반드시 준수)
+- 보정치: 능력치 / 2 (예: 능력치 15 → 7.5)
+- HP: 체력 × 4
 - 기본 판정: d20(숙련도 스택 최댓값) + 보정치
 - 숙련도 스택: 능력치 20당 d20 +1, 가장 높은 값 채택 (예: 능력치 40 → d20 2개 → 최댓값)
-- 스킬 설명에 능력치가 2개 이상 명시된 경우: 각 보너스를 모두 합산
-- 방어 판정: d20(숙련도 스택 최댓값) + (체력/10)
-- 회피 판정: d20(숙련도 스택 최댓값) + (민첩/10)
-- 데미지: 무기 주사위(폭발) + 보정치
+- 스킬 설명에 능력치가 2개 이상 명시된 경우: 각 보너스(능력치/2)를 모두 합산
+- 방어 판정: d20(숙련도 스택 최댓값) + (체력/2)
+- 회피 판정: d20(숙련도 스택 최댓값) + (민첩/2)
+- 데미지: 무기 주사위(폭발) + 능력치 원본 + 명중 격차
 - 폭발 주사위: 무기 주사위에서 최댓값이 나오면 한 번 더 굴려 합산 (연속 가능)
 - 임시 스탯 반영: 이미 캐릭터 시트에 합산되어 있음
 - 특성은 씬 배경 또는 행동 상황에 따라 활성화 여부 판단
 
-## 크리티컬/퍼블 처리 (배수 누적)
-- 공격자 채택 d20 = 20 (Natural 20): 최종 데미지 ×3
-- 방어자 채택 d20 = 1 (Fumble): 최종 데미지 ×2
-- 두 조건이 겹치면 ×6
-- 명중 격차(Gap) = ATK - DEF. Gap > 0이면 명중, 데미지 = (무기주사위 + Gap) × 크리티컬 배수
-- Gap ≤ 0이면 빗나감 (데미지 0)
+## 명중 격차 & 크리티컬
+- 명중 격차(Gap) = ATK - DEF. Gap >= 0이면 명중, < 0이면 빗나감(데미지 0)
+- 공격자 채택 d20 = 20 (Natural 20): 최종 데미지 ×2
+- 데미지 공식: (무기주사위합 + 능력치 원본 + 격차) × 크리티컬 배수
+- 공격 성공 시 연속 공격 가능
 
 ## 응답 형식
 반드시 아래 JSON만 출력하세요. 추가 텍스트, 마크다운 코드블록, 설명 일절 없이 JSON 객체만:

@@ -132,6 +132,8 @@ const commands = [
     .addUserOption(o => o.setName('유저').setDescription('전이할 유저 (기본: 본인)')),
 
   // ─── GM 관리 ───
+  new SlashCommandBuilder().setName('gm캐릭터등록').setDescription('플레이어의 캐릭터를 GM이 대신 등록합니다 (팝업 창)')
+    .addUserOption(o => o.setName('유저').setDescription('대상 플레이어').setRequired(true)),
   new SlashCommandBuilder().setName('레벨업').setDescription('플레이어를 레벨업합니다 (GM 전용)')
     .addUserOption(o => o.setName('유저').setDescription('대상 유저').setRequired(true)),
   new SlashCommandBuilder().setName('gm수정').setDescription('플레이어 능력치를 수정합니다 (GM 전용)')

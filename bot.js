@@ -16,7 +16,9 @@ const path = require('path');
 //  상수 & 파일 경로
 // ───────────────────────────────────────────
 const GM_ROLE         = 'GM';
-const DATA_DIR        = path.join(__dirname, 'data');
+// DATA_DIR: Railway Volume 등 영속 저장소 경로를 env로 지정하면 그쪽에 저장됨.
+// (Railway: Volume 추가 후 Mount Path /data, env DATA_DIR=/data)
+const DATA_DIR        = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CHAR_FILE       = path.join(DATA_DIR, 'characters.json');
 const INV_FILE        = path.join(DATA_DIR, 'inventory.json');
 const MISSION_FILE    = path.join(DATA_DIR, 'missions.json');
@@ -520,8 +522,9 @@ function buildCombatEmbed(cs, characters, npcs) {
 // ───────────────────────────────────────────
 //  임시 등록 상태 (Modal 2단계용)
 // ───────────────────────────────────────────
-const pendingChars = new Map(); // userId → partial char data
-const pendingNPCs  = new Map(); // userId → partial npc data
+const pendingChars      = new Map(); // userId → partial char data
+const pendingNPCs       = new Map(); // userId → partial npc data
+const gmRegisterTargets = new Map(); // gmUserId → 대상 플레이어 userId (GM이 대신 등록 중)
 
 // ───────────────────────────────────────────
 //  인터랙션 핸들러
@@ -601,14 +604,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ content: '❌ 기본스탯 형식 오류. 예) `10 8 12 15 10 5 15`', ephemeral: true });
       }
 
-      pendingChars.set(uid, { nickname, race, job, affiliation, stats });
+      // GM 대리 등록 모드인지 확인
+      const isGmMode  = gmRegisterTargets.has(uid);
+      const targetUid = gmRegisterTargets.get(uid) ?? uid;
+
+      pendingChars.set(uid, { nickname, race, job, affiliation, stats, _targetUid: targetUid, _isGmMode: isGmMode });
 
       const nextBtn = new ButtonBuilder()
         .setCustomId('char_next_btn')
         .setLabel('다음 단계로 (2/2) →')
         .setStyle(ButtonStyle.Primary);
+      const head = isGmMode
+        ? `✅ (GM 등록) 1단계 입력 완료: **${nickname}** → <@${targetUid}>`
+        : `✅ 1단계 입력 완료: **${nickname}**`;
       return interaction.reply({
-        content: `✅ 1단계 입력 완료: **${nickname}**\n아래 버튼을 눌러 2단계(스킬·특성·특수스탯)로 진행해주세요.`,
+        content: `${head}\n아래 버튼을 눌러 2단계(스킬·특성·특수스탯)로 진행해주세요.`,
         components: [new ActionRowBuilder().addComponents(nextBtn)],
         ephemeral: true,
       });
@@ -620,6 +630,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!partial) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/상태등록`을 다시 시도해주세요.', ephemeral: true });
       pendingChars.delete(uid);
 
+      // GM 대리 등록 정보 추출
+      const targetUid = partial._targetUid ?? uid;
+      const isGmMode  = partial._isGmMode ?? false;
+      delete partial._targetUid; delete partial._isGmMode;
+      if (isGmMode) gmRegisterTargets.delete(uid);
+
       const skillsRaw      = interaction.fields.getTextInputValue('skills');
       const traitsRaw      = interaction.fields.getTextInputValue('traits');
       const specialRaw     = interaction.fields.getTextInputValue('specialStats');
@@ -630,11 +646,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const char = { ...partial, skills, traits, specialStats, tempStats: {} };
       initChar(char);
       const characters = loadJSON(CHAR_FILE);
-      characters[uid] = char;
+      characters[targetUid] = char;
       saveJSON(CHAR_FILE, characters);
 
-      await interaction.reply({ content: `✅ **${char.nickname}** 캐릭터 등록 완료!` });
-      return interaction.followUp({ embeds: [charEmbed(char, interaction.member)] });
+      // 임베드 표시용 멤버 — GM 모드면 대상 멤버를 fetch
+      const targetMember = isGmMode
+        ? await interaction.guild.members.fetch(targetUid).catch(() => null)
+        : interaction.member;
+
+      const head = isGmMode
+        ? `✅ (GM 등록) **${char.nickname}** 캐릭터를 <@${targetUid}>에게 등록했습니다!`
+        : `✅ **${char.nickname}** 캐릭터 등록 완료!`;
+      await interaction.reply({ content: head });
+      return interaction.followUp({ embeds: [charEmbed(char, targetMember ?? interaction.member)] });
     }
 
     // ── 미션 등록 Modal ──
@@ -779,6 +803,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder().setCustomId('stats')
           .setLabel('기본스탯 (체력 근력 민첩 지능 매력 감각 정신력 순서로 공백 구분)')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('예) 9 5 12 15 12 5 15')
+          .setRequired(true)
+      ),
+    );
+    return interaction.showModal(modal);
+  }
+
+  // ── GM이 플레이어 캐릭터 대신 등록 ───────────────
+  if (cmd === 'gm캐릭터등록') {
+    if (!isGM(member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
+    const targetUser = interaction.options.getUser('유저');
+    if (!targetUser) return interaction.reply({ content: '❌ 대상 유저를 지정해주세요.', ephemeral: true });
+    if (targetUser.bot) return interaction.reply({ content: '❌ 봇은 캐릭터로 등록할 수 없습니다.', ephemeral: true });
+
+    gmRegisterTargets.set(interaction.user.id, targetUser.id);
+
+    const modal = new ModalBuilder()
+      .setCustomId('char_modal_1')
+      .setTitle(`GM 등록 (1/2) — ${targetUser.username}`);
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('nickname').setLabel('닉네임').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('race').setLabel('종족 (없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('job').setLabel('직업 (없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('affiliation').setLabel('소속 (없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('stats')
+          .setLabel('기본스탯 (체력 근력 민첩 지능 매력 감각 정신력)')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder('예) 9 5 12 15 12 5 15')
           .setRequired(true)
@@ -1826,7 +1886,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         { name: '🎒 인벤토리',  value: '`/인벤` `/아이템추가` `/아이템제거`',              inline: false },
         { name: '📜 미션',      value: '`/미션` `/미션등록` 🔒 팝업창 등록 `/미션수정` 🔒 `/미션완료` 🔒 `/미션삭제` 🔒', inline: false },
         { name: '👤 NPC 🔒',    value: '`/npc` `/npc등록` 팝업창 등록 `/npc수정` `/npc체력` `/npc삭제`', inline: false },
-        { name: '🛠️ GM 관리 🔒', value: ['`/레벨업` `/gm수정` `/gm체력`', '`/gm임시스탯` `/gm스킬추가` `/gm스킬제거`', '`/gm특성추가` `/gm특성제거` `/gm특수스탯추가` `/gm특수스탯제거`', '`/gm설명등록`'].join('\n'), inline: false },
+        { name: '🛠️ GM 관리 🔒', value: ['`/gm캐릭터등록 유저:@철수` — 플레이어 캐릭터 대신 등록 (팝업)', '`/레벨업` `/gm수정` `/gm체력`', '`/gm임시스탯` `/gm스킬추가` `/gm스킬제거`', '`/gm특성추가` `/gm특성제거` `/gm특수스탯추가` `/gm특수스탯제거`', '`/gm설명등록`'].join('\n'), inline: false },
       )
       .setFooter({ text: '🔒 = GM 역할 필요' });
     return interaction.reply({ embeds: [embed], ephemeral: true });
@@ -1996,6 +2056,7 @@ ${action}
 client.once(Events.ClientReady, c => {
   console.log(`✅ ${c.user.tag} 봇이 시작되었습니다!`);
   console.log(`   서버 수: ${c.guilds.cache.size}`);
+  console.log(`   📂 DATA_DIR: ${DATA_DIR}${process.env.DATA_DIR ? ' (env override)' : ' (default - 휘발성!)'}`);
 });
 
 process.on('unhandledRejection', err => console.error('에러:', err));

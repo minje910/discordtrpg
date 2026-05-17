@@ -509,6 +509,7 @@ function charEmbed(char, member) {
       { name: '📈 상태창',          value: statsLines || '없음',                       inline: false },
     )
     .setFooter({ text: `플레이어: ${member.displayName}` });
+  if (char.imageUrl) embed.setThumbnail(char.imageUrl);
   const sp = char.specialStats;
   if (Object.keys(sp).length) {
     const spLines = Object.entries(sp).map(([k, v]) => {
@@ -584,9 +585,10 @@ function buildCombatEmbed(cs, characters, npcs) {
 // ───────────────────────────────────────────
 //  임시 등록 상태 (Modal 2단계용)
 // ───────────────────────────────────────────
-const pendingChars      = new Map(); // userId → partial char data
-const pendingNPCs       = new Map(); // userId → partial npc data
-const gmRegisterTargets = new Map(); // gmUserId → 대상 플레이어 userId (GM이 대신 등록 중)
+const pendingChars         = new Map(); // userId → partial char data
+const pendingNPCs          = new Map(); // userId → partial npc data
+const gmRegisterTargets    = new Map(); // gmUserId → 대상 플레이어 userId (GM이 대신 등록 중)
+const pendingProfileImages = new Map(); // submitterUid → 프로필 사진 URL (등록 중)
 
 // ───────────────────────────────────────────
 //  인터랙션 핸들러
@@ -705,7 +707,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const traits         = traitsRaw.trim()  ? traitsRaw.split(',').map(t => t.trim()).filter(Boolean)  : [];
       const specialStats   = parseSpecialStats(specialRaw);
 
-      const char = { ...partial, skills, traits, specialStats, tempStats: {} };
+      // 등록 시점에 첨부한 프로필 사진 적용
+      const imageUrl = pendingProfileImages.get(uid);
+      if (imageUrl) pendingProfileImages.delete(uid);
+
+      const char = { ...partial, skills, traits, specialStats, tempStats: {}, ...(imageUrl ? { imageUrl } : {}) };
       initChar(char);
       const allChars = loadJSON(CHAR_FILE);
       const book = getCharBook(allChars, interaction.guild.id, targetUid);
@@ -846,6 +852,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // ── 상태등록 (Modal) ──────────────────────────────
   if (cmd === '상태등록') {
+    const att = interaction.options.getAttachment('사진');
+    if (att) {
+      if (!att.contentType?.startsWith('image/'))
+        return interaction.reply({ content: '❌ 이미지 파일만 첨부 가능합니다. (PNG/JPG/GIF/WEBP)', ephemeral: true });
+      pendingProfileImages.set(interaction.user.id, att.url);
+    } else {
+      pendingProfileImages.delete(interaction.user.id);
+    }
     const modal = new ModalBuilder()
       .setCustomId('char_modal_1')
       .setTitle('캐릭터 등록 (1/2) — 기본 정보');
@@ -880,6 +894,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const targetUser = interaction.options.getUser('유저');
     if (!targetUser) return interaction.reply({ content: '❌ 대상 유저를 지정해주세요.', ephemeral: true });
     if (targetUser.bot) return interaction.reply({ content: '❌ 봇은 캐릭터로 등록할 수 없습니다.', ephemeral: true });
+
+    const att = interaction.options.getAttachment('사진');
+    if (att) {
+      if (!att.contentType?.startsWith('image/'))
+        return interaction.reply({ content: '❌ 이미지 파일만 첨부 가능합니다. (PNG/JPG/GIF/WEBP)', ephemeral: true });
+      pendingProfileImages.set(interaction.user.id, att.url);
+    } else {
+      pendingProfileImages.delete(interaction.user.id);
+    }
 
     gmRegisterTargets.set(interaction.user.id, targetUser.id);
 
@@ -955,6 +978,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ? `현재 활성: **[${book.active}] ${book.profiles[book.active].nickname}**`
       : '활성 프로필이 없습니다. `/상태등록`으로 새로 만들거나 `/프로필선택`으로 골라주세요.';
     return interaction.reply({ content: `🗑️ 프로필 **[${targetId}] ${removedName}** 삭제됨.\n${tail}` });
+  }
+  if (cmd === '프로필사진') {
+    const att = interaction.options.getAttachment('사진');
+    if (!att.contentType?.startsWith('image/'))
+      return interaction.reply({ content: '❌ 이미지 파일만 첨부 가능합니다. (PNG/JPG/GIF/WEBP)', ephemeral: true });
+    const characters = loadJSON(CHAR_FILE);
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
+    char.imageUrl = att.url;
+    saveJSON(CHAR_FILE, characters);
+    return interaction.reply({ content: `🖼️ **${char.nickname}** 프로필 사진이 변경되었습니다.`, embeds: [charEmbed(char, interaction.member)] });
+  }
+  if (cmd === '프로필사진제거') {
+    const characters = loadJSON(CHAR_FILE);
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
+    if (!char.imageUrl) return interaction.reply({ content: 'ℹ️ 설정된 프로필 사진이 없습니다.', ephemeral: true });
+    delete char.imageUrl;
+    saveJSON(CHAR_FILE, characters);
+    return interaction.reply({ content: `🗑️ **${char.nickname}** 프로필 사진을 제거했습니다.` });
   }
 
   // ── 상태창 ───────────────────────────────────────
@@ -1988,7 +2031,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setTitle('📖 TRPG 봇 명령어 목록').setColor(0x3498DB)
       .addFields(
         { name: '🎲 주사위',    value: '`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-)', inline: false },
-        { name: '📊 캐릭터 (다중 프로필 지원)',    value: ['`/상태등록` — 새 캐릭터 프로필 생성 (한 명이 여러 개 가능)', '`/프로필목록` `/프로필선택 id:N` `/프로필삭제 id:N`', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
+        { name: '📊 캐릭터 (다중 프로필 지원)',    value: ['`/상태등록 [사진:첨부]` — 새 캐릭터 프로필 생성 (한 명이 여러 개 가능)', '`/프로필목록` `/프로필선택 id:N` `/프로필삭제 id:N`', '`/프로필사진 사진:첨부` — 활성 프로필 사진 설정 / `/프로필사진제거`', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
         { name: '⚔️ 스킬·특성·특수스탯', value: ['`/스킬추가` `/스킬제거` `/특성추가` `/특성제거`', '`/특수스탯추가` `/특수스탯제거`'].join('\n'), inline: false },
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },
         { name: '🎯 판정',      value: '`/판정 일반` `/판정 공격` `/판정 방어` `/판정 회피` `/판정 데미지`', inline: false },

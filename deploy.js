@@ -6,7 +6,8 @@ const commands = [
     .addStringOption(o => o.setName('dice').setDescription('예) 2d6, 1d20+1d10, 2d6+5-1d4').setRequired(true)),
 
   // ─── 상태창 ───
-  new SlashCommandBuilder().setName('상태등록').setDescription('새 캐릭터 프로필을 등록합니다 (여러 개 가능)'),
+  new SlashCommandBuilder().setName('상태등록').setDescription('새 캐릭터 프로필을 등록합니다 (여러 개 가능)')
+    .addAttachmentOption(o => o.setName('사진').setDescription('프로필 사진 (선택)')),
   new SlashCommandBuilder().setName('상태창').setDescription('활성 캐릭터의 상태창을 봅니다')
     .addUserOption(o => o.setName('유저').setDescription('다른 유저 상태창 보기')),
   new SlashCommandBuilder().setName('프로필목록').setDescription('내 캐릭터 프로필 목록을 봅니다 (다중 프로필)'),
@@ -136,9 +137,15 @@ const commands = [
   new SlashCommandBuilder().setName('이세계전이').setDescription('이세계 전이 사망 원인을 랜덤으로 굴립니다 (93가지)')
     .addUserOption(o => o.setName('유저').setDescription('전이할 유저 (기본: 본인)')),
 
+  // ─── 프로필 사진 ───
+  new SlashCommandBuilder().setName('프로필사진').setDescription('활성 캐릭터의 프로필 사진을 설정/변경합니다')
+    .addAttachmentOption(o => o.setName('사진').setDescription('프로필 이미지 (PNG/JPG/GIF/WEBP)').setRequired(true)),
+  new SlashCommandBuilder().setName('프로필사진제거').setDescription('활성 캐릭터의 프로필 사진을 제거합니다'),
+
   // ─── GM 관리 ───
   new SlashCommandBuilder().setName('gm캐릭터등록').setDescription('플레이어의 캐릭터를 GM이 대신 등록합니다 (팝업 창)')
-    .addUserOption(o => o.setName('유저').setDescription('대상 플레이어').setRequired(true)),
+    .addUserOption(o => o.setName('유저').setDescription('대상 플레이어').setRequired(true))
+    .addAttachmentOption(o => o.setName('사진').setDescription('프로필 사진 (선택)')),
   new SlashCommandBuilder().setName('레벨업').setDescription('플레이어를 레벨업합니다 (GM 전용)')
     .addUserOption(o => o.setName('유저').setDescription('대상 유저').setRequired(true)),
   new SlashCommandBuilder().setName('gm수정').setDescription('플레이어 능력치를 수정합니다 (GM 전용)')

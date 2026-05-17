@@ -183,6 +183,68 @@ function loadJSON(fp) {
 function saveJSON(fp, data) { fs.writeFileSync(fp, JSON.stringify(data, null, 2), 'utf-8'); }
 
 // ───────────────────────────────────────────
+//  서버별 + 다중 프로필 데이터 액세스 헬퍼
+// ───────────────────────────────────────────
+// 캐릭터 구조: allChars[guildId][uid] = { active: "1", profiles: { "1": charObj, "2": charObj } }
+// 기타 데이터: all[guildId][...] = ...
+
+function getCharBook(allChars, guildId, uid) {
+  if (!allChars[guildId]) allChars[guildId] = {};
+  let book = allChars[guildId][uid];
+  if (!book || typeof book !== 'object' || !book.profiles) {
+    book = { active: null, profiles: {} };
+    allChars[guildId][uid] = book;
+  }
+  return book;
+}
+
+function activeOf(allChars, guildId, uid) {
+  const book = allChars?.[guildId]?.[uid];
+  if (!book?.active || !book.profiles) return null;
+  return book.profiles[book.active] || null;
+}
+
+function loadCharCtx(guildId, uid) {
+  const all  = loadJSON(CHAR_FILE);
+  const book = getCharBook(all, guildId, uid);
+  const char = book.active ? book.profiles[book.active] : null;
+  return { all, book, char };
+}
+
+function nextProfileId(book) {
+  const ids = Object.keys(book.profiles || {}).map(Number).filter(n => !isNaN(n));
+  return String((ids.length ? Math.max(...ids) : 0) + 1);
+}
+
+function addProfile(book, char) {
+  const nid = nextProfileId(book);
+  book.profiles = book.profiles || {};
+  book.profiles[nid] = char;
+  book.active = nid;
+  return nid;
+}
+
+// 비-캐릭터 파일용 길드 스코프 (NPC, 인벤, 미션, 씬, 행동선언)
+function guildScope(file, guildId) {
+  const all = loadJSON(file);
+  if (!all[guildId]) all[guildId] = {};
+  return [all, all[guildId]];
+}
+
+// 한 길드 내 모든 유저의 활성 프로필을 { uid → charObj } 형태로 반환 (전투/씬/AI용)
+function activeCharsForGuild(allChars, guildId) {
+  const out = {};
+  const guildBook = allChars?.[guildId];
+  if (!guildBook) return out;
+  for (const [uid, book] of Object.entries(guildBook)) {
+    if (book?.active && book.profiles?.[book.active]) {
+      out[uid] = book.profiles[book.active];
+    }
+  }
+  return out;
+}
+
+// ───────────────────────────────────────────
 //  턴 타임아웃 관리
 // ───────────────────────────────────────────
 const turnTimeouts = new Map();
@@ -234,8 +296,8 @@ async function updateCombatDashboard(guildId, channel) {
   const cs = combatData[guildId];
   if (!cs?.active) return;
 
-  const characters = loadJSON(CHAR_FILE);
-  const npcs       = loadJSON(NPC_FILE);
+  const characters = activeCharsForGuild(loadJSON(CHAR_FILE), guildId);
+  const [, npcs]   = guildScope(NPC_FILE, guildId);
   const embed      = buildCombatEmbed(cs, characters, npcs);
 
   try {
@@ -252,8 +314,8 @@ async function updateCombatDashboard(guildId, channel) {
 // ───────────────────────────────────────────
 //  씬 트리거 알림
 // ───────────────────────────────────────────
-async function triggerSceneTraits(channel, newBackgrounds) {
-  const characters = loadJSON(CHAR_FILE);
+async function triggerSceneTraits(channel, guildId, newBackgrounds) {
+  const characters = activeCharsForGuild(loadJSON(CHAR_FILE), guildId);
   const triggered  = [];
 
   for (const [userId, char] of Object.entries(characters)) {
@@ -645,9 +707,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const char = { ...partial, skills, traits, specialStats, tempStats: {} };
       initChar(char);
-      const characters = loadJSON(CHAR_FILE);
-      characters[targetUid] = char;
-      saveJSON(CHAR_FILE, characters);
+      const allChars = loadJSON(CHAR_FILE);
+      const book = getCharBook(allChars, interaction.guild.id, targetUid);
+      const newId = addProfile(book, char);  // 새 프로필로 추가 (덮어쓰기 X)
+      saveJSON(CHAR_FILE, allChars);
 
       // 임베드 표시용 멤버 — GM 모드면 대상 멤버를 fetch
       const targetMember = isGmMode
@@ -655,8 +718,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         : interaction.member;
 
       const head = isGmMode
-        ? `✅ (GM 등록) **${char.nickname}** 캐릭터를 <@${targetUid}>에게 등록했습니다!`
-        : `✅ **${char.nickname}** 캐릭터 등록 완료!`;
+        ? `✅ (GM 등록) **${char.nickname}** 캐릭터를 <@${targetUid}>에게 프로필 #${newId}로 등록했습니다!`
+        : `✅ **${char.nickname}** 캐릭터를 프로필 #${newId}로 등록했습니다! (활성 프로필로 설정됨)`;
       await interaction.reply({ content: head });
       return interaction.followUp({ embeds: [charEmbed(char, targetMember ?? interaction.member)] });
     }
@@ -672,7 +735,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const personalRaw = interaction.fields.getTextInputValue('personal').trim();
       const isPersonal  = personalRaw === '예' || personalRaw === 'Y' || personalRaw === 'y';
 
-      const missions = loadJSON(MISSION_FILE);
+      const [missionsAll, missions] = guildScope(MISSION_FILE, interaction.guild.id);
       const ids      = Object.keys(missions).map(Number).filter(n => !isNaN(n));
       const nextId   = String((ids.length ? Math.max(...ids) : 0) + 1);
       missions[nextId] = {
@@ -680,7 +743,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         personal: isPersonal, targets: null,
         createdBy: uid, createdAt: new Date().toISOString(), active: true,
       };
-      saveJSON(MISSION_FILE, missions);
+      saveJSON(MISSION_FILE, missionsAll);
 
       await interaction.reply({ embeds: [missionEmbed(nextId, missions[nextId])] });
       return interaction.followUp({ content: `✅ 미션 등록 완료! (ID: \`${nextId}\`)${isPersonal ? '\n⚠️ 개인미션 대상자는 `/미션수정` 으로 추가해주세요.' : ''}` });
@@ -744,11 +807,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         createdAt: new Date().toISOString(),
       };
 
-      const npcs  = loadJSON(NPC_FILE);
+      const [npcsAll, npcs] = guildScope(NPC_FILE, interaction.guild.id);
       const ids   = Object.keys(npcs).map(Number).filter(n => !isNaN(n));
       const nid   = String((ids.length ? Math.max(...ids) : 0) + 1);
       npcs[nid] = npc;
-      saveJSON(NPC_FILE, npcs);
+      saveJSON(NPC_FILE, npcsAll);
 
       await interaction.reply({ content: `✅ NPC 등록 완료! (ID: \`${nid}\`)` });
       return interaction.followUp({ embeds: [npcEmbed(nid, npc)] });
@@ -847,14 +910,61 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.showModal(modal);
   }
 
+  // ── 프로필 관리 ──────────────────────────────────
+  if (cmd === '프로필목록') {
+    const characters = loadJSON(CHAR_FILE);
+    const book = getCharBook(characters, interaction.guild.id, interaction.user.id);
+    const entries = Object.entries(book.profiles || {}).sort(([a],[b]) => Number(a)-Number(b));
+    if (!entries.length)
+      return interaction.reply({ content: '📋 등록된 프로필이 없습니다. `/상태등록`으로 만들어주세요.', ephemeral: true });
+    const lines = entries.map(([pid, c]) => {
+      const mark = pid === book.active ? '⭐' : '・';
+      return `${mark} **[${pid}]** ${c.nickname} — Lv.${c.level ?? 1} ${c.race || ''}/${c.job || ''}`;
+    });
+    return interaction.reply({ embeds: [new EmbedBuilder()
+      .setTitle('📚 내 프로필 목록').setColor(0x3498DB)
+      .setDescription(lines.join('\n'))
+      .setFooter({ text: `⭐ = 활성 프로필 | /프로필선택 id:N 으로 전환` })
+    ], ephemeral: true });
+  }
+  if (cmd === '프로필선택') {
+    const targetId = interaction.options.getString('id');
+    const characters = loadJSON(CHAR_FILE);
+    const book = getCharBook(characters, interaction.guild.id, interaction.user.id);
+    if (!book.profiles?.[targetId])
+      return interaction.reply({ content: `❌ 프로필 ID \`${targetId}\`를 찾을 수 없습니다. \`/프로필목록\`으로 확인해주세요.`, ephemeral: true });
+    book.active = targetId;
+    saveJSON(CHAR_FILE, characters);
+    const ch = book.profiles[targetId];
+    return interaction.reply({ content: `⭐ 활성 프로필을 **[${targetId}] ${ch.nickname}**(으)로 전환했습니다.`, embeds: [charEmbed(ch, interaction.member)] });
+  }
+  if (cmd === '프로필삭제') {
+    const targetId = interaction.options.getString('id');
+    const characters = loadJSON(CHAR_FILE);
+    const book = getCharBook(characters, interaction.guild.id, interaction.user.id);
+    if (!book.profiles?.[targetId])
+      return interaction.reply({ content: `❌ 프로필 ID \`${targetId}\`를 찾을 수 없습니다.`, ephemeral: true });
+    const removedName = book.profiles[targetId].nickname;
+    delete book.profiles[targetId];
+    if (book.active === targetId) {
+      const remaining = Object.keys(book.profiles).sort((a,b) => Number(a)-Number(b));
+      book.active = remaining[0] ?? null;
+    }
+    saveJSON(CHAR_FILE, characters);
+    const tail = book.active
+      ? `현재 활성: **[${book.active}] ${book.profiles[book.active].nickname}**`
+      : '활성 프로필이 없습니다. `/상태등록`으로 새로 만들거나 `/프로필선택`으로 골라주세요.';
+    return interaction.reply({ content: `🗑️ 프로필 **[${targetId}] ${removedName}** 삭제됨.\n${tail}` });
+  }
+
   // ── 상태창 ───────────────────────────────────────
   if (cmd === '상태창') {
     const targetUser   = interaction.options.getUser('유저');
     const targetMember = targetUser ? await interaction.guild.members.fetch(targetUser.id).catch(() => null) : member;
     if (!targetMember) return interaction.reply({ content: '❌ 유저를 찾을 수 없습니다.', ephemeral: true });
     const characters = loadJSON(CHAR_FILE);
-    const char       = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: targetMember.id === interaction.user.id ? '❌ 등록된 캐릭터가 없습니다. `/상태등록`으로 등록해주세요.' : '❌ 해당 유저의 캐릭터가 없습니다.', ephemeral: true });
+    const char       = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: targetMember.id === interaction.user.id ? '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 골라주세요.' : '❌ 해당 유저의 활성 캐릭터가 없습니다.', ephemeral: true });
     initChar(char); saveJSON(CHAR_FILE, characters);
     return interaction.reply({ embeds: [charEmbed(char, targetMember)] });
   }
@@ -866,8 +976,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const value    = rawVal === '무한' ? Infinity : parseInt(rawVal, 10);
     if (isNaN(value)) return interaction.reply({ content: '❌ 값은 숫자 또는 `무한` 으로 입력해주세요.', ephemeral: true });
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     initChar(char);
     if (statName in char.stats)            { char.stats[statName] = value; char.hp.max = calcMaxHP(char); }
     else if (statName in char.specialStats) { char.specialStats[statName] = value; }
@@ -881,8 +991,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const field = interaction.options.getString('항목');
     const value = interaction.options.getString('값');
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     const fieldMap = { '닉네임': 'nickname', '종족': 'race', '직업': 'job' };
     const old = char[fieldMap[field]];
     char[fieldMap[field]] = value;
@@ -894,8 +1004,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (cmd === '소속변경') {
     const newAff = interaction.options.getString('소속');
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     const old = char.affiliation || '미등록';
     char.affiliation = newAff; saveJSON(CHAR_FILE, characters);
     return interaction.reply({ content: `✅ 소속 변경: **${old}** → **${newAff}**` });
@@ -906,8 +1016,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const statName = interaction.options.getString('스탯');
     const amount   = interaction.options.getInteger('값');
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     initChar(char);
     if ((char.statPoints ?? 0) <= 0) return interaction.reply({ content: '❌ 분배 가능한 능력치가 없습니다.', ephemeral: true });
     if (amount > char.statPoints)    return interaction.reply({ content: `❌ 분배 가능 능력치 부족 (보유: **${char.statPoints}** 점)`, ephemeral: true });
@@ -927,8 +1037,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (cmd === '처치') {
     const enemyLevel = interaction.options.getInteger('레벨');
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     initChar(char);
     char.exp += enemyLevel;
     const lines = [`⚔️ Lv.${enemyLevel} 적 처치! 경험치 **+${enemyLevel}** 획득`];
@@ -947,8 +1057,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const action = interaction.options.getString('행동');
     const amount = interaction.options.getInteger('값');
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     initChar(char);
     const fate = char.fatePoints;
     let msg;
@@ -965,8 +1075,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const listKey = isSkill ? 'skills' : 'traits', label = isSkill ? '스킬' : '특성';
     const item    = interaction.options.getString('이름');
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     char[listKey] = char[listKey] || [];
     if (isAdd) {
       if (char[listKey].includes(item)) return interaction.reply({ content: `⚠️ 이미 등록된 ${label}입니다.`, ephemeral: true });
@@ -985,8 +1095,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const rawVal = interaction.options.getString('값');
     const spVal  = rawVal === '무한' ? Infinity : parseInt(rawVal, 10);
     if (isNaN(spVal)) return interaction.reply({ content: '❌ 값은 숫자 또는 `무한` 으로 입력해주세요.', ephemeral: true });
-    const characters = loadJSON(CHAR_FILE); const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     char.specialStats = char.specialStats || {};
     if (spName in char.specialStats) return interaction.reply({ content: `⚠️ 이미 등록된 특수 스탯입니다.`, ephemeral: true });
     char.specialStats[spName] = spVal; saveJSON(CHAR_FILE, characters);
@@ -994,8 +1104,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
   if (cmd === '특수스탯제거') {
     const spName = interaction.options.getString('이름');
-    const characters = loadJSON(CHAR_FILE); const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     char.specialStats = char.specialStats || {};
     if (!(spName in char.specialStats)) return interaction.reply({ content: `❌ 특수 스탯을 찾을 수 없습니다.`, ephemeral: true });
     delete char.specialStats[spName]; saveJSON(CHAR_FILE, characters);
@@ -1005,8 +1115,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // ── 판정 ─────────────────────────────────────────
   if (cmd === '판정') {
     const sub = interaction.options.getSubcommand();
-    const characters = loadJSON(CHAR_FILE); const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     initChar(char);
     let embed;
     const fmtRolls = (rolls, picked) => rolls.map(r => r === picked ? `**${r}**` : `${r}`).join(', ');
@@ -1062,7 +1172,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (cmd === '인벤') {
     const targetUser   = interaction.options.getUser('유저');
     const targetMember = targetUser ? await interaction.guild.members.fetch(targetUser.id).catch(() => null) : member;
-    const inventory = loadJSON(INV_FILE); const items = inventory[targetMember.id] || {};
+    const [, inventory] = guildScope(INV_FILE, interaction.guild.id);
+    const items = inventory[targetMember.id] || {};
     const entries = Object.entries(items);
     return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🎒 ${targetMember.displayName}의 인벤토리`).setColor(0xE67E22)
       .setDescription(entries.length ? entries.map(([n,c]) => c > 1 ? `• **${n}** × ${c}` : `• **${n}**`).join('\n') : '비어있습니다.')] });
@@ -1070,28 +1181,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (cmd === '아이템추가') {
     const name  = interaction.options.getString('이름');
     const count = interaction.options.getInteger('개수') ?? 1;
-    const inventory = loadJSON(INV_FILE);
+    const [invAll, inventory] = guildScope(INV_FILE, interaction.guild.id);
     if (!inventory[interaction.user.id]) inventory[interaction.user.id] = {};
     inventory[interaction.user.id][name] = (inventory[interaction.user.id][name] || 0) + count;
-    saveJSON(INV_FILE, inventory);
+    saveJSON(INV_FILE, invAll);
     return interaction.reply({ content: `✅ **${name}** ${count}개 추가됨! (보유: ${inventory[interaction.user.id][name]}개)` });
   }
   if (cmd === '아이템제거') {
     const name  = interaction.options.getString('이름');
     const count = interaction.options.getInteger('개수') ?? 1;
-    const inventory = loadJSON(INV_FILE); const items = inventory[interaction.user.id] || {};
+    const [invAll, inventory] = guildScope(INV_FILE, interaction.guild.id);
+    const items = inventory[interaction.user.id] || {};
     if (!items[name]) return interaction.reply({ content: `❌ **${name}** 아이템을 찾을 수 없습니다.`, ephemeral: true });
     items[name] -= count;
     let msg;
     if (items[name] <= 0) { delete items[name]; msg = `🗑️ **${name}** 제거됨.`; }
     else msg = `🗑️ **${name}** ${count}개 제거됨. (남은 수량: ${items[name]})`;
-    saveJSON(INV_FILE, inventory);
+    saveJSON(INV_FILE, invAll);
     return interaction.reply({ content: msg });
   }
 
   // ── 미션 ─────────────────────────────────────────
   if (cmd === '미션') {
-    const missions = loadJSON(MISSION_FILE), missionId = interaction.options.getString('id');
+    const [, missions] = guildScope(MISSION_FILE, interaction.guild.id);
+    const missionId = interaction.options.getString('id');
     if (!Object.keys(missions).length) return interaction.reply({ content: '📋 등록된 미션이 없습니다.', ephemeral: true });
     if (missionId) {
       const m = missions[missionId];
@@ -1121,33 +1234,34 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
   if (cmd === '미션수정') {
     if (!isGM(member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
-    const missionId = interaction.options.getString('id'); const missions = loadJSON(MISSION_FILE);
+    const missionId = interaction.options.getString('id'); const [missionsAll, missions] = guildScope(MISSION_FILE, interaction.guild.id);
     if (!missions[missionId]) return interaction.reply({ content: `❌ 미션 ID \`${missionId}\`를 찾을 수 없습니다.`, ephemeral: true });
     const field = interaction.options.getString('항목');
     const newVal = interaction.options.getString('값');
     const fieldMap = { '제목': 'title', '부제목': 'subtitle', '설명': 'description', '보상': 'reward' };
     if (!fieldMap[field]) return interaction.reply({ content: `❌ 수정 가능 항목: 제목/부제목/설명/보상`, ephemeral: true });
-    missions[missionId][fieldMap[field]] = newVal; saveJSON(MISSION_FILE, missions);
+    missions[missionId][fieldMap[field]] = newVal; saveJSON(MISSION_FILE, missionsAll);
     return interaction.reply({ content: `✅ **${field}** 수정 완료!`, embeds: [missionEmbed(missionId, missions[missionId])] });
   }
   if (cmd === '미션완료') {
     if (!isGM(member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
-    const missionId = interaction.options.getString('id'); const missions = loadJSON(MISSION_FILE);
+    const missionId = interaction.options.getString('id'); const [missionsAll, missions] = guildScope(MISSION_FILE, interaction.guild.id);
     if (!missions[missionId]) return interaction.reply({ content: `❌ 미션 ID \`${missionId}\`를 찾을 수 없습니다.`, ephemeral: true });
-    missions[missionId].active = false; saveJSON(MISSION_FILE, missions);
+    missions[missionId].active = false; saveJSON(MISSION_FILE, missionsAll);
     return interaction.reply({ content: `✅ 미션 **${missions[missionId].title}** 완료 처리 🔴` });
   }
   if (cmd === '미션삭제') {
     if (!isGM(member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
-    const missionId = interaction.options.getString('id'); const missions = loadJSON(MISSION_FILE);
+    const missionId = interaction.options.getString('id'); const [missionsAll, missions] = guildScope(MISSION_FILE, interaction.guild.id);
     if (!missions[missionId]) return interaction.reply({ content: `❌ 미션 ID \`${missionId}\`를 찾을 수 없습니다.`, ephemeral: true });
-    const title = missions[missionId].title; delete missions[missionId]; saveJSON(MISSION_FILE, missions);
+    const title = missions[missionId].title; delete missions[missionId]; saveJSON(MISSION_FILE, missionsAll);
     return interaction.reply({ content: `🗑️ 미션 **${title}** 삭제됨.` });
   }
 
   // ── NPC ──────────────────────────────────────────
   if (cmd === 'npc') {
-    const npcs = loadJSON(NPC_FILE), npcId = interaction.options.getString('id');
+    const [, npcs] = guildScope(NPC_FILE, interaction.guild.id);
+    const npcId = interaction.options.getString('id');
     if (!Object.keys(npcs).length) return interaction.reply({ content: '📋 등록된 NPC가 없습니다.', ephemeral: true });
     if (npcId) {
       if (!npcs[npcId]) return interaction.reply({ content: `❌ NPC ID \`${npcId}\`를 찾을 수 없습니다.`, ephemeral: true });
@@ -1174,14 +1288,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (cmd === 'npc체력') {
     if (!isGM(member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
     const npcId = interaction.options.getString('id'), action = interaction.options.getString('행동'), amount = interaction.options.getInteger('값');
-    const npcs = loadJSON(NPC_FILE);
+    const [npcsAll, npcs] = guildScope(NPC_FILE, interaction.guild.id);
     if (!npcs[npcId]) return interaction.reply({ content: `❌ NPC ID \`${npcId}\`를 찾을 수 없습니다.`, ephemeral: true });
     const npc = npcs[npcId]; if (!npc.hp) npc.hp = { current: 0, max: npcMaxHP(npc) };
     const before = npc.hp.current;
     if (action === '하락')       npc.hp.current = Math.max(0, npc.hp.current - amount);
     else if (action === '회복')  npc.hp.current = Math.min(npc.hp.max, npc.hp.current + amount);
     else                         npc.hp.current = Math.max(0, Math.min(npc.hp.max, amount));
-    saveJSON(NPC_FILE, npcs);
+    saveJSON(NPC_FILE, npcsAll);
     const diff = npc.hp.current - before;
     // 전투 대시보드 갱신
     const combatData = loadJSON(COMBAT_FILE);
@@ -1191,9 +1305,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
   if (cmd === 'npc삭제') {
     if (!isGM(member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
-    const npcId = interaction.options.getString('id'); const npcs = loadJSON(NPC_FILE);
+    const npcId = interaction.options.getString('id'); const [npcsAll, npcs] = guildScope(NPC_FILE, interaction.guild.id);
     if (!npcs[npcId]) return interaction.reply({ content: `❌ NPC ID \`${npcId}\`를 찾을 수 없습니다.`, ephemeral: true });
-    const name = npcs[npcId].name; delete npcs[npcId]; saveJSON(NPC_FILE, npcs);
+    const name = npcs[npcId].name; delete npcs[npcId]; saveJSON(NPC_FILE, npcsAll);
     return interaction.reply({ content: `🗑️ NPC **${name}** 삭제됨.` });
   }
   if (cmd === 'npc수정') {
@@ -1201,7 +1315,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const npcId  = interaction.options.getString('id');
     const field  = interaction.options.getString('항목');
     const rawVal = interaction.options.getString('값');
-    const npcs   = loadJSON(NPC_FILE);
+    const [npcsAll, npcs] = guildScope(NPC_FILE, interaction.guild.id);
     if (!npcs[npcId]) return interaction.reply({ content: `❌ NPC ID \`${npcId}\`를 찾을 수 없습니다.`, ephemeral: true });
     const npc = npcs[npcId];
     let resultMsg = '';
@@ -1233,7 +1347,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } else if (field === '스킬제거') { npc.skills = (npc.skills || []).filter(s => s !== rawVal); resultMsg = `⚔️ 스킬 제거: **${rawVal}**`;
     } else if (field === '특성추가') { npc.traits = npc.traits || []; if (!npc.traits.includes(rawVal)) { npc.traits.push(rawVal); resultMsg = `🔮 특성 추가: **${rawVal}**`; } else return interaction.reply({ content: `⚠️ 이미 등록된 특성입니다.`, ephemeral: true });
     } else if (field === '특성제거') { npc.traits = (npc.traits || []).filter(t => t !== rawVal); resultMsg = `🔮 특성 제거: **${rawVal}**`; }
-    saveJSON(NPC_FILE, npcs);
+    saveJSON(NPC_FILE, npcsAll);
     await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🛠️ NPC 수정 완료').setColor(0x95A5A6)
       .setDescription(`**[NPC-${npcId}] ${npc.name}** 수정됨`)
       .addFields({ name: '변경 내용', value: resultMsg })
@@ -1247,8 +1361,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const targetUser = interaction.options.getUser('유저');
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     if (!targetMember) return interaction.reply({ content: '❌ 유저를 찾을 수 없습니다.', ephemeral: true });
-    const characters = loadJSON(CHAR_FILE); const char = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: `❌ 캐릭터가 없습니다.`, ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: `❌ 해당 유저의 활성 캐릭터가 없습니다.`, ephemeral: true });
     initChar(char); char.level++; char.statPoints += 5; saveJSON(CHAR_FILE, characters);
     return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🎉 레벨 업!').setColor(0xF1C40F)
       .setDescription(`**${char.nickname}** 의 레벨이 올랐습니다!`)
@@ -1260,8 +1374,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const targetUser = interaction.options.getUser('유저');
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     const fieldName = interaction.options.getString('항목'), rawVal = interaction.options.getString('값');
-    const characters = loadJSON(CHAR_FILE); const char = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: `❌ 캐릭터가 없습니다.`, ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: `❌ 해당 유저의 활성 캐릭터가 없습니다.`, ephemeral: true });
     initChar(char); let resultMsg = '';
     if (fieldName === '소속') { char.affiliation = rawVal; resultMsg = `🏠 **소속** → **${rawVal}**`; }
     else {
@@ -1288,8 +1402,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const targetUser = interaction.options.getUser('유저');
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     const action = interaction.options.getString('행동'), amount = interaction.options.getInteger('값');
-    const characters = loadJSON(CHAR_FILE); const char = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: '❌ 캐릭터가 없습니다.', ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: '❌ 해당 유저의 활성 캐릭터가 없습니다.', ephemeral: true });
     initChar(char); const before = char.hp.current;
     if (action === '하락')      char.hp.current = Math.max(0, char.hp.current - amount);
     else if (action === '회복') char.hp.current = Math.min(char.hp.max, char.hp.current + amount);
@@ -1307,8 +1421,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const targetUser = interaction.options.getUser('유저');
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     const statName = interaction.options.getString('스탯'), value = interaction.options.getInteger('값');
-    const characters = loadJSON(CHAR_FILE); const char = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: '❌ 캐릭터가 없습니다.', ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: '❌ 해당 유저의 활성 캐릭터가 없습니다.', ephemeral: true });
     initChar(char);
     if (!(statName in char.stats) && !(statName in char.specialStats))
       return interaction.reply({ content: `❌ \`${statName}\` 스탯을 찾을 수 없습니다.`, ephemeral: true });
@@ -1326,8 +1440,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const targetUser = interaction.options.getUser('유저');
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     const itemName = interaction.options.getString('이름'), isAdd = gcmd.endsWith('추가');
-    const characters = loadJSON(CHAR_FILE); const char = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: '❌ 캐릭터가 없습니다.', ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: '❌ 해당 유저의 활성 캐릭터가 없습니다.', ephemeral: true });
     char[listKey] = char[listKey] || [];
     if (isAdd) {
       if (char[listKey].includes(itemName)) return interaction.reply({ content: `⚠️ 이미 보유한 ${label}입니다.`, ephemeral: true });
@@ -1344,8 +1458,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const targetUser = interaction.options.getUser('유저');
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     const spName = interaction.options.getString('이름'), spVal = interaction.options.getInteger('값');
-    const characters = loadJSON(CHAR_FILE); const char = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: '❌ 캐릭터가 없습니다.', ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: '❌ 해당 유저의 활성 캐릭터가 없습니다.', ephemeral: true });
     char.specialStats = char.specialStats || {};
     if (spName in char.specialStats) return interaction.reply({ content: `⚠️ 이미 보유한 특수 스탯입니다.`, ephemeral: true });
     char.specialStats[spName] = spVal; saveJSON(CHAR_FILE, characters);
@@ -1356,8 +1470,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const targetUser = interaction.options.getUser('유저');
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     const spName = interaction.options.getString('이름');
-    const characters = loadJSON(CHAR_FILE); const char = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: '❌ 캐릭터가 없습니다.', ephemeral: true });
+    const characters = loadJSON(CHAR_FILE); const char = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: '❌ 해당 유저의 활성 캐릭터가 없습니다.', ephemeral: true });
     char.specialStats = char.specialStats || {};
     if (!(spName in char.specialStats)) return interaction.reply({ content: `❌ 보유하지 않은 특수 스탯입니다.`, ephemeral: true });
     delete char.specialStats[spName]; saveJSON(CHAR_FILE, characters);
@@ -1370,8 +1484,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const desc = interaction.options.getString('설명');
     const name = interaction.options.getString('이름') ?? null;
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     char.descriptions = char.descriptions ?? {};
     if (type === '소속') {
       char.descriptions['소속'] = { '소속': desc };
@@ -1396,8 +1510,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const targetUser = interaction.options.getUser('유저') ?? null;
     const targetMember = targetUser ? await interaction.guild.members.fetch(targetUser.id).catch(() => null) : member;
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     const descs  = char.descriptions ?? {};
     const icons  = { '스킬': '⚔️', '특성': '🔮', '특수스탯': '🔷', '소속': '🏠' };
     const icon   = icons[type];
@@ -1438,8 +1552,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const name = interaction.options.getString('이름');
     const desc = interaction.options.getString('설명');
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[targetMember.id];
-    if (!char) return interaction.reply({ content: `❌ 캐릭터가 없습니다.`, ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, targetMember.id);
+    if (!char) return interaction.reply({ content: `❌ 해당 유저의 활성 캐릭터가 없습니다.`, ephemeral: true });
     const listKey = type === '스킬' ? 'skills' : 'traits';
     if (!(char[listKey] || []).includes(name))
       return interaction.reply({ content: `❌ **${char.nickname}** 은(는) **${name}** ${type}을(를) 보유하고 있지 않습니다.`, ephemeral: true });
@@ -1479,8 +1593,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (playerIds.length === 0 && npcIds.length === 0)
       return interaction.reply({ content: '❌ 참가자를 1명 이상 지정해주세요.', ephemeral: true });
 
-    const characters = loadJSON(CHAR_FILE);
-    const npcs       = loadJSON(NPC_FILE);
+    const characters = activeCharsForGuild(loadJSON(CHAR_FILE), interaction.guild.id);
+    const [, npcs]   = guildScope(NPC_FILE, interaction.guild.id);
     const participants = [];
 
     for (const pid of playerIds) {
@@ -1538,8 +1652,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const combatData = loadJSON(COMBAT_FILE);
     const cs = combatData[guildId];
     if (!cs?.active) return interaction.reply({ content: '❌ 진행 중인 전투가 없습니다.', ephemeral: true });
-    const characters = loadJSON(CHAR_FILE);
-    const npcs       = loadJSON(NPC_FILE);
+    const characters = activeCharsForGuild(loadJSON(CHAR_FILE), guildId);
+    const [, npcs]   = guildScope(NPC_FILE, guildId);
     return interaction.reply({ embeds: [buildCombatEmbed(cs, characters, npcs)] });
   }
 
@@ -1564,8 +1678,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const diceRaw   = interaction.options.getString('주사위') ?? '1d6';
 
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
     initChar(char);
 
     const atkStat = effStat(char, statName);
@@ -1585,7 +1699,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const weaponCount = parseInt(dMatch[1]), weaponSides = parseInt(dMatch[2]);
 
     const npcMatch = targetRaw.match(/^(\d+)$/);
-    const npcs = loadJSON(NPC_FILE);
+    const [npcsAll, npcs] = guildScope(NPC_FILE, interaction.guild.id);
 
     let targetName = targetRaw;
     let defProf = null, defBonus = 0, defTotal = 0, defStatLabel = '';
@@ -1625,7 +1739,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!npc.hp) npc.hp = { current: npcMaxHP(npc), max: npcMaxHP(npc) };
         const before = npc.hp.current;
         npc.hp.current = Math.max(0, npc.hp.current - finalDmg);
-        saveJSON(NPC_FILE, npcs);
+        saveJSON(NPC_FILE, npcsAll);
 
         const explodeMark = exploded ? ' 💥 폭발!' : '';
         const critLine    = natCrit ? `\n🎯 **Natural 20!** 최종 데미지 ×2` : '';
@@ -1687,7 +1801,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setFooter({ text: `설정: ${member.displayName}` });
 
     await interaction.reply({ embeds: [embed] });
-    await triggerSceneTraits(interaction.channel, bgs);
+    await triggerSceneTraits(interaction.channel, interaction.guild.id, bgs);
   }
 
   if (cmd === '씬현황') {
@@ -1719,7 +1833,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const action     = interaction.options.getString('행동');
     const guildId    = interaction.guild.id;
     const characters = loadJSON(CHAR_FILE);
-    const char       = characters[interaction.user.id];
+    const char       = activeOf(characters, interaction.guild.id, interaction.user.id);
     const name       = char?.nickname ?? member.displayName;
 
     const decls = loadJSON(DECLARE_FILE);
@@ -1796,8 +1910,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (cmd === 'ai판정') {
     const action = interaction.options.getString('행동');
     const characters = loadJSON(CHAR_FILE);
-    const char = characters[interaction.user.id];
-    if (!char) return interaction.reply({ content: '❌ 등록된 캐릭터가 없습니다.', ephemeral: true });
+    const char = activeOf(characters, interaction.guild.id, interaction.user.id);
+    if (!char) return interaction.reply({ content: '❌ 활성 캐릭터가 없습니다. `/상태등록`으로 등록하거나 `/프로필선택`으로 활성 프로필을 선택해주세요.', ephemeral: true });
 
     const ANTHROPIC_KEY = process.env.OPENAI_API_KEY;
     if (!ANTHROPIC_KEY) return interaction.reply({ content: '❌ OPENAI_API_KEY 환경변수가 설정되지 않았습니다.', ephemeral: true });
@@ -1874,7 +1988,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setTitle('📖 TRPG 봇 명령어 목록').setColor(0x3498DB)
       .addFields(
         { name: '🎲 주사위',    value: '`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-)', inline: false },
-        { name: '📊 캐릭터',    value: ['`/상태등록` — 팝업 창으로 캐릭터 생성 (채팅 오염 없음)', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
+        { name: '📊 캐릭터 (다중 프로필 지원)',    value: ['`/상태등록` — 새 캐릭터 프로필 생성 (한 명이 여러 개 가능)', '`/프로필목록` `/프로필선택 id:N` `/프로필삭제 id:N`', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
         { name: '⚔️ 스킬·특성·특수스탯', value: ['`/스킬추가` `/스킬제거` `/특성추가` `/특성제거`', '`/특수스탯추가` `/특수스탯제거`'].join('\n'), inline: false },
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },
         { name: '🎯 판정',      value: '`/판정 일반` `/판정 공격` `/판정 방어` `/판정 회피` `/판정 데미지`', inline: false },

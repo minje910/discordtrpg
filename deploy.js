@@ -6,9 +6,14 @@ const commands = [
     .addStringOption(o => o.setName('dice').setDescription('예) 2d6, 1d20+1d10, 2d6+5-1d4').setRequired(true)),
 
   // ─── 상태창 ───
-  new SlashCommandBuilder().setName('상태등록').setDescription('캐릭터를 등록합니다 (팝업 창으로 입력)'),
-  new SlashCommandBuilder().setName('상태창').setDescription('상태창을 봅니다')
+  new SlashCommandBuilder().setName('상태등록').setDescription('새 캐릭터 프로필을 등록합니다 (여러 개 가능)'),
+  new SlashCommandBuilder().setName('상태창').setDescription('활성 캐릭터의 상태창을 봅니다')
     .addUserOption(o => o.setName('유저').setDescription('다른 유저 상태창 보기')),
+  new SlashCommandBuilder().setName('프로필목록').setDescription('내 캐릭터 프로필 목록을 봅니다 (다중 프로필)'),
+  new SlashCommandBuilder().setName('프로필선택').setDescription('활성 캐릭터 프로필을 전환합니다')
+    .addStringOption(o => o.setName('id').setDescription('프로필 ID (예: 1, 2, 3)').setRequired(true)),
+  new SlashCommandBuilder().setName('프로필삭제').setDescription('내 캐릭터 프로필을 삭제합니다')
+    .addStringOption(o => o.setName('id').setDescription('프로필 ID').setRequired(true)),
   new SlashCommandBuilder().setName('프로필수정').setDescription('닉네임·종족·직업을 수정합니다')
     .addStringOption(o => o.setName('항목').setDescription('수정할 항목').setRequired(true)
       .addChoices({ name: '닉네임', value: '닉네임' }, { name: '종족', value: '종족' }, { name: '직업', value: '직업' }))

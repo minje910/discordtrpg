@@ -209,12 +209,30 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
 (async () => {
   try {
-    console.log(`📡 슬래시 커맨드 등록 중... (${commands.length}개)`);
-    await rest.put(
-      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-      { body: commands }
-    );
-    console.log('✅ 슬래시 커맨드 등록 완료!');
+    const clientId = process.env.CLIENT_ID;
+    const guildId  = process.env.GUILD_ID;
+    if (!clientId) { console.error('❌ CLIENT_ID 환경변수가 필요합니다.'); return; }
+
+    if (guildId) {
+      // 길드 한정 등록 — 즉시 반영, 개발/테스트용
+      console.log(`📡 길드 한정 슬래시 커맨드 등록 중... (${commands.length}개, GUILD_ID=${guildId})`);
+      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+      console.log('✅ 길드 한정 등록 완료! (해당 서버에서만 작동)');
+      console.log('ℹ️  여러 서버에서 쓰려면 Railway에서 GUILD_ID 변수를 삭제하세요 (전역 등록 모드 전환).');
+    } else {
+      // 전역 등록 — 모든 서버에 적용 (최대 1시간 전파)
+      console.log(`📡 전역 슬래시 커맨드 등록 중... (${commands.length}개)`);
+      await rest.put(Routes.applicationCommands(clientId), { body: commands });
+      console.log('✅ 전역 등록 완료! (모든 서버에 적용, 최대 1시간 전파)');
+
+      // 기존에 GUILD_ID로 등록됐던 잔여 커맨드가 있으면 자동 정리
+      const oldGuildId = process.env.OLD_GUILD_ID;
+      if (oldGuildId) {
+        console.log(`🧹 OLD_GUILD_ID(${oldGuildId})의 잔여 길드 한정 커맨드 정리 중...`);
+        await rest.put(Routes.applicationGuildCommands(clientId, oldGuildId), { body: [] });
+        console.log('✅ 잔여 길드 커맨드 삭제 완료.');
+      }
+    }
   } catch (err) {
     console.error(err);
   }

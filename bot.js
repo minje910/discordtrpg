@@ -306,8 +306,12 @@ async function updateCombatDashboard(guildId, channel) {
       if (msg) { await msg.edit({ embeds: [embed] }); return; }
     }
     const msg = await channel.send({ embeds: [embed] });
-    cs.dashboardMsgId = msg.id;
-    saveJSON(COMBAT_FILE, combatData);
+    // await 후엔 다른 길드 핸들러가 동일 파일을 변경했을 수 있으므로 재로딩 후 부분 갱신
+    const fresh = loadJSON(COMBAT_FILE);
+    if (fresh[guildId]?.active) {
+      fresh[guildId].dashboardMsgId = msg.id;
+      saveJSON(COMBAT_FILE, fresh);
+    }
   } catch (e) { console.error('대시보드 갱신 오류:', e); }
 }
 
@@ -585,10 +589,13 @@ function buildCombatEmbed(cs, characters, npcs) {
 // ───────────────────────────────────────────
 //  임시 등록 상태 (Modal 2단계용)
 // ───────────────────────────────────────────
-const pendingChars         = new Map(); // userId → partial char data
-const pendingNPCs          = new Map(); // userId → partial npc data
-const gmRegisterTargets    = new Map(); // gmUserId → 대상 플레이어 userId (GM이 대신 등록 중)
-const pendingProfileImages = new Map(); // submitterUid → 프로필 사진 URL (등록 중)
+// 모든 임시 등록 맵은 "guildId:userId" 복합키로 — 한 유저가 여러 서버에서 동시에 등록해도 충돌 X
+const pendingChars         = new Map(); // "gid:uid" → partial char data
+const pendingNPCs          = new Map(); // "gid:uid" → partial npc data
+const gmRegisterTargets    = new Map(); // "gid:gmUid" → 대상 플레이어 userId
+const pendingProfileImages = new Map(); // "gid:uid" → 프로필 사진 URL (등록 중)
+
+function pendingKey(interaction) { return `${interaction.guild.id}:${interaction.user.id}`; }
 
 // ───────────────────────────────────────────
 //  인터랙션 핸들러
@@ -600,10 +607,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
   //  BUTTON 클릭 처리 — 모달 체이닝용
   // ══════════════════════════════
   if (interaction.isButton()) {
-    const uid = interaction.user.id;
+    const uid  = interaction.user.id;
+    const pkey = pendingKey(interaction);
 
     if (interaction.customId === 'char_next_btn') {
-      if (!pendingChars.has(uid)) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/상태등록`을 다시 시도해주세요.', ephemeral: true });
+      if (!pendingChars.has(pkey)) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/상태등록`을 다시 시도해주세요.', ephemeral: true });
       const modal2 = new ModalBuilder()
         .setCustomId('char_modal_2')
         .setTitle('캐릭터 등록 (2/2) — 스킬·특성·특수스탯');
@@ -622,7 +630,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.customId === 'npc_next_btn') {
-      if (!pendingNPCs.has(uid)) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/npc등록`을 다시 시도해주세요.', ephemeral: true });
+      if (!pendingNPCs.has(pkey)) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/npc등록`을 다시 시도해주세요.', ephemeral: true });
       const modal2 = new ModalBuilder()
         .setCustomId('npc_modal_2')
         .setTitle('NPC 등록 (2/2) — 스탯·스킬·특성');
@@ -669,10 +677,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       // GM 대리 등록 모드인지 확인
-      const isGmMode  = gmRegisterTargets.has(uid);
-      const targetUid = gmRegisterTargets.get(uid) ?? uid;
+      const pkey      = pendingKey(interaction);
+      const isGmMode  = gmRegisterTargets.has(pkey);
+      const targetUid = gmRegisterTargets.get(pkey) ?? uid;
 
-      pendingChars.set(uid, { nickname, race, job, affiliation, stats, _targetUid: targetUid, _isGmMode: isGmMode });
+      pendingChars.set(pkey, { nickname, race, job, affiliation, stats, _targetUid: targetUid, _isGmMode: isGmMode });
 
       const nextBtn = new ButtonBuilder()
         .setCustomId('char_next_btn')
@@ -690,15 +699,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // ── 캐릭터 등록 2단계 ──
     if (interaction.customId === 'char_modal_2') {
-      const partial = pendingChars.get(uid);
+      const pkey    = pendingKey(interaction);
+      const partial = pendingChars.get(pkey);
       if (!partial) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/상태등록`을 다시 시도해주세요.', ephemeral: true });
-      pendingChars.delete(uid);
+      pendingChars.delete(pkey);
 
       // GM 대리 등록 정보 추출
       const targetUid = partial._targetUid ?? uid;
       const isGmMode  = partial._isGmMode ?? false;
       delete partial._targetUid; delete partial._isGmMode;
-      if (isGmMode) gmRegisterTargets.delete(uid);
+      if (isGmMode) gmRegisterTargets.delete(pkey);
 
       const skillsRaw      = interaction.fields.getTextInputValue('skills');
       const traitsRaw      = interaction.fields.getTextInputValue('traits');
@@ -708,8 +718,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const specialStats   = parseSpecialStats(specialRaw);
 
       // 등록 시점에 첨부한 프로필 사진 적용
-      const imageUrl = pendingProfileImages.get(uid);
-      if (imageUrl) pendingProfileImages.delete(uid);
+      const imageUrl = pendingProfileImages.get(pkey);
+      if (imageUrl) pendingProfileImages.delete(pkey);
 
       const char = { ...partial, skills, traits, specialStats, tempStats: {}, ...(imageUrl ? { imageUrl } : {}) };
       initChar(char);
@@ -767,7 +777,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const level       = parseInt(levelRaw, 10);
       const hasLevel    = !isNaN(level) && level > 0;
 
-      pendingNPCs.set(uid, { name, race, job, affiliation, hasLevel, level: hasLevel ? level : 1 });
+      pendingNPCs.set(pendingKey(interaction), { name, race, job, affiliation, hasLevel, level: hasLevel ? level : 1 });
 
       const nextBtn = new ButtonBuilder()
         .setCustomId('npc_next_btn')
@@ -784,9 +794,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.customId === 'npc_modal_2') {
       if (!isGM(interaction.member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
 
-      const partial = pendingNPCs.get(uid);
+      const pkey    = pendingKey(interaction);
+      const partial = pendingNPCs.get(pkey);
       if (!partial) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/npc등록`을 다시 시도해주세요.', ephemeral: true });
-      pendingNPCs.delete(uid);
+      pendingNPCs.delete(pkey);
 
       const statsRaw    = interaction.fields.getTextInputValue('stats');
       const specialRaw  = interaction.fields.getTextInputValue('specialStats');
@@ -852,13 +863,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // ── 상태등록 (Modal) ──────────────────────────────
   if (cmd === '상태등록') {
+    const pkey = pendingKey(interaction);
     const att = interaction.options.getAttachment('사진');
     if (att) {
       if (!att.contentType?.startsWith('image/'))
         return interaction.reply({ content: '❌ 이미지 파일만 첨부 가능합니다. (PNG/JPG/GIF/WEBP)', ephemeral: true });
-      pendingProfileImages.set(interaction.user.id, att.url);
+      pendingProfileImages.set(pkey, att.url);
     } else {
-      pendingProfileImages.delete(interaction.user.id);
+      pendingProfileImages.delete(pkey);
     }
     const modal = new ModalBuilder()
       .setCustomId('char_modal_1')
@@ -895,16 +907,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!targetUser) return interaction.reply({ content: '❌ 대상 유저를 지정해주세요.', ephemeral: true });
     if (targetUser.bot) return interaction.reply({ content: '❌ 봇은 캐릭터로 등록할 수 없습니다.', ephemeral: true });
 
+    const pkey = pendingKey(interaction);
     const att = interaction.options.getAttachment('사진');
     if (att) {
       if (!att.contentType?.startsWith('image/'))
         return interaction.reply({ content: '❌ 이미지 파일만 첨부 가능합니다. (PNG/JPG/GIF/WEBP)', ephemeral: true });
-      pendingProfileImages.set(interaction.user.id, att.url);
+      pendingProfileImages.set(pkey, att.url);
     } else {
-      pendingProfileImages.delete(interaction.user.id);
+      pendingProfileImages.delete(pkey);
     }
 
-    gmRegisterTargets.set(interaction.user.id, targetUser.id);
+    gmRegisterTargets.set(pkey, targetUser.id);
 
     const modal = new ModalBuilder()
       .setCustomId('char_modal_1')

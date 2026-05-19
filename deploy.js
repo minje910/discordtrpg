@@ -7,6 +7,7 @@ const commands = [
 
   // ─── 상태창 ───
   new SlashCommandBuilder().setName('상태등록').setDescription('새 캐릭터 프로필을 등록합니다 (여러 개 가능)')
+    .addStringOption(o => o.setName('스탯').setDescription('스탯 이름 (쉼표 구분, 예: 체력,근력,민첩). 비우면 기본 7개'))
     .addAttachmentOption(o => o.setName('사진').setDescription('프로필 사진 (선택)')),
   new SlashCommandBuilder().setName('상태창').setDescription('활성 캐릭터의 상태창을 봅니다')
     .addUserOption(o => o.setName('유저').setDescription('다른 유저 상태창 보기')),
@@ -90,7 +91,8 @@ const commands = [
   // ─── NPC ───
   new SlashCommandBuilder().setName('npc').setDescription('NPC를 봅니다')
     .addStringOption(o => o.setName('id').setDescription('특정 NPC ID')),
-  new SlashCommandBuilder().setName('npc등록').setDescription('NPC를 등록합니다 (GM 전용, 팝업 창)'),
+  new SlashCommandBuilder().setName('npc등록').setDescription('NPC를 등록합니다 (GM 전용, 팝업 창)')
+    .addStringOption(o => o.setName('스탯').setDescription('스탯 이름 (쉼표 구분). 비우면 기본 7개')),
   new SlashCommandBuilder().setName('npc체력').setDescription('NPC 체력을 조정합니다 (GM 전용)')
     .addStringOption(o => o.setName('id').setDescription('NPC ID').setRequired(true))
     .addStringOption(o => o.setName('행동').setDescription('하락 / 회복 / 설정').setRequired(true)
@@ -142,14 +144,11 @@ const commands = [
     .addAttachmentOption(o => o.setName('사진').setDescription('프로필 이미지 (PNG/JPG/GIF/WEBP)').setRequired(true)),
   new SlashCommandBuilder().setName('프로필사진제거').setDescription('활성 캐릭터의 프로필 사진을 제거합니다'),
 
-  // ─── 서버별 스탯 시스템 설정 ───
-  new SlashCommandBuilder().setName('스탯설정').setDescription('이 서버의 기본 스탯 이름·개수를 설정합니다 (GM 전용)')
-    .addStringOption(o => o.setName('이름들').setDescription('쉼표 구분 (예: 체력,근력,민첩,지능,매력,감각,정신력). "기본"이면 기본값으로 복원').setRequired(true)),
-  new SlashCommandBuilder().setName('스탯목록').setDescription('이 서버에 현재 설정된 기본 스탯 목록을 봅니다'),
 
   // ─── GM 관리 ───
   new SlashCommandBuilder().setName('gm캐릭터등록').setDescription('플레이어의 캐릭터를 GM이 대신 등록합니다 (팝업 창)')
     .addUserOption(o => o.setName('유저').setDescription('대상 플레이어').setRequired(true))
+    .addStringOption(o => o.setName('스탯').setDescription('스탯 이름 (쉼표 구분). 비우면 기본 7개'))
     .addAttachmentOption(o => o.setName('사진').setDescription('프로필 사진 (선택)')),
   new SlashCommandBuilder().setName('레벨업').setDescription('플레이어를 레벨업합니다 (GM 전용)')
     .addUserOption(o => o.setName('유저').setDescription('대상 유저').setRequired(true)),

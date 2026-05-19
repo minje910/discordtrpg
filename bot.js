@@ -26,6 +26,8 @@ const NPC_FILE        = path.join(DATA_DIR, 'npcs.json');
 const COMBAT_FILE     = path.join(DATA_DIR, 'combat.json');
 const SCENE_FILE      = path.join(DATA_DIR, 'scenes.json');
 const DECLARE_FILE    = path.join(DATA_DIR, 'declarations.json');
+const CONFIG_FILE     = path.join(DATA_DIR, 'config.json');   // 길드별 설정 (스탯 목록 등)
+const DEFAULT_STATS   = ['체력', '근력', '민첩', '지능', '매력', '감각', '정신력'];
 const TURN_TIMEOUT_MS = 10 * 60 * 1000; // 10분 (Deadly Strike 규칙)
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -476,15 +478,39 @@ function parseSpecialStats(raw) {
   return result;
 }
 
-// 기본스탯 문자열 파싱: "10 8 12 15 10 5 15"
-function parseBaseStats(raw) {
-  const keys   = ['체력', '근력', '민첩', '지능', '매력', '감각', '정신력'];
+// 길드별 스탯 이름 목록 가져오기 (없으면 기본값)
+function getStatList(guildId) {
+  if (!guildId) return DEFAULT_STATS;
+  const cfg = loadJSON(CONFIG_FILE);
+  const list = cfg[guildId]?.stats;
+  return Array.isArray(list) && list.length ? list : DEFAULT_STATS;
+}
+function setStatList(guildId, list) {
+  const cfg = loadJSON(CONFIG_FILE);
+  cfg[guildId] = cfg[guildId] || {};
+  cfg[guildId].stats = list;
+  saveJSON(CONFIG_FILE, cfg);
+}
+
+// 기본스탯 문자열 파싱: "10 8 12 15 10 5 15" → { 체력:10, 근력:8, ... }
+// statList 인자가 없으면 기본 7개 키를 씀
+function parseBaseStats(raw, statList = DEFAULT_STATS) {
   const nums   = raw.trim().split(/\s+/).map(Number);
   const result = {};
-  for (let i = 0; i < keys.length; i++) {
-    result[keys[i]] = isNaN(nums[i]) ? 0 : nums[i];
+  for (let i = 0; i < statList.length; i++) {
+    result[statList[i]] = isNaN(nums[i]) ? 0 : nums[i];
   }
   return result;
+}
+
+// 스탯 입력 모달용 라벨/플레이스홀더 생성기
+function statsModalLabel(statList) {
+  const label = `기본스탯 (${statList.join(' ')} 순)`;
+  return label.length > 45 ? `기본스탯 (${statList.length}개, 공백 구분)` : label;
+}
+function statsModalPlaceholder(statList) {
+  const samples = [9, 5, 12, 15, 12, 5, 15, 10, 8, 11, 13, 7, 14, 6, 16, 4, 12, 8, 10, 9];
+  return `예) ${statList.map((_, i) => samples[i] ?? 10).join(' ')}`;
 }
 
 // ───────────────────────────────────────────
@@ -631,12 +657,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.customId === 'npc_next_btn') {
       if (!pendingNPCs.has(pkey)) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/npc등록`을 다시 시도해주세요.', ephemeral: true });
+      const statList = getStatList(interaction.guild.id);
       const modal2 = new ModalBuilder()
         .setCustomId('npc_modal_2')
         .setTitle('NPC 등록 (2/2) — 스탯·스킬·특성');
       modal2.addComponents(
         new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('stats').setLabel('기본스탯 (체력 근력 민첩 지능 매력 감각 정신력)').setStyle(TextInputStyle.Short).setPlaceholder('예) 9 8 10 7 5 6 8').setRequired(true)
+          new TextInputBuilder().setCustomId('stats').setLabel(statsModalLabel(statList)).setStyle(TextInputStyle.Short).setPlaceholder(statsModalPlaceholder(statList)).setRequired(true)
         ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder().setCustomId('specialStats').setLabel('특수스탯 (이름:값, 이름:값 / 없으면 빈칸)').setStyle(TextInputStyle.Short).setRequired(false)
@@ -671,9 +698,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const affiliation = interaction.fields.getTextInputValue('affiliation') || '미등록';
       const statsRaw    = interaction.fields.getTextInputValue('stats');
 
+      const statList = getStatList(interaction.guild.id);
       let stats;
-      try { stats = parseBaseStats(statsRaw); } catch {
-        return interaction.reply({ content: '❌ 기본스탯 형식 오류. 예) `10 8 12 15 10 5 15`', ephemeral: true });
+      try { stats = parseBaseStats(statsRaw, statList); } catch {
+        return interaction.reply({ content: `❌ 기본스탯 형식 오류. 예) ${statList.map(()=>10).join(' ')}`, ephemeral: true });
       }
 
       // GM 대리 등록 모드인지 확인
@@ -805,9 +833,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const traitsRaw   = interaction.fields.getTextInputValue('traits');
       const memo        = interaction.fields.getTextInputValue('memo');
 
+      const statList = getStatList(interaction.guild.id);
       let stats;
-      try { stats = parseBaseStats(statsRaw); } catch {
-        return interaction.reply({ content: '❌ 기본스탯 형식 오류.', ephemeral: true });
+      try { stats = parseBaseStats(statsRaw, statList); } catch {
+        return interaction.reply({ content: `❌ 기본스탯 형식 오류. 예) ${statList.map(()=>10).join(' ')}`, ephemeral: true });
       }
 
       const specialStats = parseSpecialStats(specialRaw);
@@ -872,6 +901,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } else {
       pendingProfileImages.delete(pkey);
     }
+    const statList = getStatList(interaction.guild.id);
     const modal = new ModalBuilder()
       .setCustomId('char_modal_1')
       .setTitle('캐릭터 등록 (1/2) — 기본 정보');
@@ -891,9 +921,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder().setCustomId('stats')
-          .setLabel('기본스탯 (체력 근력 민첩 지능 매력 감각 정신력 순서로 공백 구분)')
+          .setLabel(statsModalLabel(statList))
           .setStyle(TextInputStyle.Short)
-          .setPlaceholder('예) 9 5 12 15 12 5 15')
+          .setPlaceholder(statsModalPlaceholder(statList))
           .setRequired(true)
       ),
     );
@@ -919,6 +949,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     gmRegisterTargets.set(pkey, targetUser.id);
 
+    const statList = getStatList(interaction.guild.id);
     const modal = new ModalBuilder()
       .setCustomId('char_modal_1')
       .setTitle(`GM 등록 (1/2) — ${targetUser.username}`);
@@ -937,9 +968,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder().setCustomId('stats')
-          .setLabel('기본스탯 (체력 근력 민첩 지능 매력 감각 정신력)')
+          .setLabel(statsModalLabel(statList))
           .setStyle(TextInputStyle.Short)
-          .setPlaceholder('예) 9 5 12 15 12 5 15')
+          .setPlaceholder(statsModalPlaceholder(statList))
           .setRequired(true)
       ),
     );
@@ -1011,6 +1042,60 @@ client.on(Events.InteractionCreate, async (interaction) => {
     delete char.imageUrl;
     saveJSON(CHAR_FILE, characters);
     return interaction.reply({ content: `🗑️ **${char.nickname}** 프로필 사진을 제거했습니다.` });
+  }
+
+  // ── 서버별 스탯 시스템 설정 ──────────────────────
+  if (cmd === '스탯목록') {
+    const list = getStatList(interaction.guild.id);
+    const isDefault = list === DEFAULT_STATS;
+    return interaction.reply({ embeds: [new EmbedBuilder()
+      .setTitle('📈 이 서버의 기본 스탯 시스템')
+      .setColor(0x3498DB)
+      .setDescription(list.map((s, i) => `**${i+1}.** ${s}`).join('\n'))
+      .setFooter({ text: `총 ${list.length}개${isDefault ? ' (기본값)' : ' (커스텀)'} | GM이 /스탯설정으로 변경 가능` })
+    ], ephemeral: true });
+  }
+  if (cmd === '스탯설정') {
+    if (!isGM(member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
+    const raw = interaction.options.getString('이름들').trim();
+
+    if (raw === '기본' || raw === 'default') {
+      const cfg = loadJSON(CONFIG_FILE);
+      if (cfg[interaction.guild.id]) delete cfg[interaction.guild.id].stats;
+      saveJSON(CONFIG_FILE, cfg);
+      return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🔄 기본 스탯 시스템으로 복원').setColor(0x2ECC71)
+        .setDescription(DEFAULT_STATS.map((s, i) => `**${i+1}.** ${s}`).join('\n'))
+        .setFooter({ text: `이미 등록된 캐릭터의 스탯은 변경되지 않습니다.` })] });
+    }
+
+    // 쉼표 / 공백 / 한국어 쉼표(、) 모두 허용
+    const names = raw.split(/[,，、\s]+/).map(s => s.trim()).filter(Boolean);
+    if (names.length < 1)
+      return interaction.reply({ content: '❌ 스탯을 1개 이상 지정해주세요. 예: `체력,근력,민첩`', ephemeral: true });
+    if (names.length > 20)
+      return interaction.reply({ content: '❌ 스탯은 최대 20개까지만 설정할 수 있습니다.', ephemeral: true });
+    if (new Set(names).size !== names.length)
+      return interaction.reply({ content: '❌ 중복된 스탯 이름이 있습니다.', ephemeral: true });
+    if (names.some(n => n.length > 12))
+      return interaction.reply({ content: '❌ 스탯 이름은 12자 이하만 가능합니다.', ephemeral: true });
+    if (names.some(n => /[`*_~|\\]/.test(n)))
+      return interaction.reply({ content: '❌ 스탯 이름에 마크다운 특수문자(`*_~|\\`)는 쓸 수 없습니다.', ephemeral: true });
+
+    setStatList(interaction.guild.id, names);
+
+    const warnings = [];
+    if (!names.includes('체력')) warnings.push('⚠️ `체력`이 없으면 HP가 0으로 계산됩니다. (HP = 체력 × 4)');
+    if (!names.includes('민첩')) warnings.push('⚠️ `민첩`이 없으면 /판정 회피가 0으로 계산됩니다.');
+
+    return interaction.reply({ embeds: [new EmbedBuilder()
+      .setTitle('✅ 스탯 시스템 변경 완료').setColor(0x2ECC71)
+      .setDescription(names.map((s, i) => `**${i+1}.** ${s}`).join('\n'))
+      .addFields(
+        { name: '총 개수', value: `${names.length}개`, inline: true },
+        ...(warnings.length ? [{ name: '주의', value: warnings.join('\n'), inline: false }] : []),
+        { name: '안내', value: '이미 등록된 캐릭터·NPC의 스탯 키는 자동 변환되지 않습니다. 새로 등록하는 캐릭터부터 새 스탯이 적용됩니다.', inline: false },
+      )
+      .setFooter({ text: `설정자: ${member.displayName} | /스탯설정 이름들:기본 으로 복원 가능` })] });
   }
 
   // ── 상태창 ───────────────────────────────────────
@@ -2045,6 +2130,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .addFields(
         { name: '🎲 주사위',    value: '`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-)', inline: false },
         { name: '📊 캐릭터 (다중 프로필 지원)',    value: ['`/상태등록 [사진:첨부]` — 새 캐릭터 프로필 생성 (한 명이 여러 개 가능)', '`/프로필목록` `/프로필선택 id:N` `/프로필삭제 id:N`', '`/프로필사진 사진:첨부` — 활성 프로필 사진 설정 / `/프로필사진제거`', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
+        { name: '⚙️ 서버 설정 🔒',  value: ['`/스탯목록` — 이 서버의 스탯 이름·개수 확인', '`/스탯설정 이름들:체력,근력,민첩,...` — 서버별 스탯 시스템 커스터마이즈 (GM)'].join('\n'), inline: false },
         { name: '⚔️ 스킬·특성·특수스탯', value: ['`/스킬추가` `/스킬제거` `/특성추가` `/특성제거`', '`/특수스탯추가` `/특수스탯제거`'].join('\n'), inline: false },
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },
         { name: '🎯 판정',      value: '`/판정 일반` `/판정 공격` `/판정 방어` `/판정 회피` `/판정 데미지`', inline: false },

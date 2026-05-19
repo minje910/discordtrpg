@@ -355,13 +355,27 @@ function effStat(char, s) {
   if (base === Infinity) return Infinity;
   return base + temp;
 }
+// HP 공식: { stat, mult } | { fixed } | undefined(기본 체력*4)
+function applyHpFormula(getStat, formula) {
+  if (formula?.fixed != null) return formula.fixed;
+  if (formula?.stat) {
+    const v = getStat(formula.stat);
+    return v === Infinity ? Infinity : v * (formula.mult ?? 4);
+  }
+  // 기본값
+  const def = getStat('체력');
+  return def === Infinity ? Infinity : def * 4;
+}
 function calcMaxHP(char) {
-  const hp = effStat(char, '체력');
-  return hp === Infinity ? Infinity : hp * 4;          // 내추럴 하이 스피드: 체력 × 4
+  return applyHpFormula(s => effStat(char, s), char?.hpFormula);
 }
 function npcMaxHP(npc) {
-  const hp = npc?.stats?.체력 ?? 0;
-  return hp * 4;
+  return applyHpFormula(s => npc?.stats?.[s] ?? 0, npc?.hpFormula);
+}
+function hpFormulaLabel(formula) {
+  if (!formula) return '체력 × 4 (기본)';
+  if (formula.fixed != null) return `고정 ${formula.fixed}`;
+  return `${formula.stat} × ${formula.mult ?? 4}`;
 }
 function requiredExp(lv)   { return lv * 10; }
 function rollDice(n, s)    { return Array.from({ length: n }, () => Math.floor(Math.random() * s) + 1); }
@@ -477,6 +491,28 @@ function parseSpecialStats(raw) {
   return result;
 }
 
+// 슬래시 옵션 "체력계산" 문자열 → { stat, mult } 또는 { fixed } 또는 null(기본)
+// 형식: "체력*4", "용기*5", "100", "체력 * 4" 등
+function parseHpFormulaOption(raw) {
+  if (!raw || !raw.trim()) return { formula: null, error: null };  // 기본값 사용
+  const clean = raw.replace(/\s+/g, '');
+  const fixedMatch = clean.match(/^(\d+)$/);
+  if (fixedMatch) {
+    const n = parseInt(fixedMatch[1], 10);
+    if (n < 0 || n > 100000) return { formula: null, error: 'HP 고정값은 0~100000 사이여야 합니다.' };
+    return { formula: { fixed: n }, error: null };
+  }
+  const statMatch = clean.match(/^(.+?)\*(\d+)$/);
+  if (statMatch) {
+    const stat = statMatch[1], mult = parseInt(statMatch[2], 10);
+    if (!stat || stat.length > 12) return { formula: null, error: '스탯 이름이 비었거나 12자를 초과합니다.' };
+    if (/[`*_~|\\]/.test(stat))   return { formula: null, error: '스탯 이름에 마크다운 특수문자(`*_~|\\)는 쓸 수 없습니다.' };
+    if (mult < 0 || mult > 100)   return { formula: null, error: '체력 배수는 0~100 사이여야 합니다.' };
+    return { formula: { stat, mult }, error: null };
+  }
+  return { formula: null, error: '형식 오류. 예) `체력*4` 또는 `용기*5` 또는 고정값 `100`' };
+}
+
 // 슬래시 옵션 "스탯" 문자열 → 스탯 이름 배열 (검증 포함)
 // 비어있으면 DEFAULT_STATS 반환. 유효하지 않으면 error 반환.
 function parseStatOption(raw) {
@@ -535,7 +571,7 @@ function charEmbed(char, member) {
       { name: '⭐ 운명점',          value: `${fate.current} / ${fate.max}`,             inline: true  },
       { name: '✨ 분배 가능 능력치', value: `**${char.statPoints}** 점`,               inline: true  },
       { name: '📊 경험치',          value: `${char.exp} / ${requiredExp(char.level)}`,  inline: true  },
-      { name: '❤️ 체력',            value: makeHPBar(char.hp.current, char.hp.max),     inline: false },
+      { name: `❤️ 체력 (${hpFormulaLabel(char.hpFormula)})`, value: makeHPBar(char.hp.current, char.hp.max), inline: false },
       { name: '🏠 소속',            value: char.affiliation || '미등록',               inline: true  },
       { name: '📈 상태창',          value: statsLines || '없음',                       inline: false },
     )
@@ -579,7 +615,7 @@ function npcEmbed(nid, npc) {
   if (npc.affiliation && npc.affiliation !== '미등록') desc += `\n**소속**: ${npc.affiliation}`;
   const embed = new EmbedBuilder().setColor(0x95A5A6)
     .setTitle(`👤 [NPC-${nid}] ${npc.name}`).setDescription(desc)
-    .addFields({ name: '❤️ 체력', value: makeHPBar(npc.hp?.current ?? maxHP, maxHP), inline: false });
+    .addFields({ name: `❤️ 체력 (${hpFormulaLabel(npc.hpFormula)})`, value: makeHPBar(npc.hp?.current ?? maxHP, maxHP), inline: false });
   if (npc.stats && Object.keys(npc.stats).length)
     embed.addFields({ name: '📈 스탯', value: Object.entries(npc.stats).map(([k,v]) => `**${k}**: ${v}`).join('\n'), inline: true });
   if (npc.specialStats && Object.keys(npc.specialStats).length)
@@ -622,6 +658,7 @@ const pendingNPCs          = new Map(); // "gid:uid" → partial npc data
 const gmRegisterTargets    = new Map(); // "gid:gmUid" → 대상 플레이어 userId
 const pendingProfileImages = new Map(); // "gid:uid" → 프로필 사진 URL (등록 중)
 const pendingStatLists     = new Map(); // "gid:uid" → 이번 등록에 쓸 스탯 이름 배열
+const pendingHpFormulas    = new Map(); // "gid:uid" → 이번 등록에 쓸 HP 공식 { stat, mult } | { fixed }
 
 function pendingKey(interaction) { return `${interaction.guild.id}:${interaction.user.id}`; }
 
@@ -748,11 +785,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const traits         = traitsRaw.trim()  ? traitsRaw.split(',').map(t => t.trim()).filter(Boolean)  : [];
       const specialStats   = parseSpecialStats(specialRaw);
 
-      // 등록 시점에 첨부한 프로필 사진 적용
-      const imageUrl = pendingProfileImages.get(pkey);
+      // 등록 시점에 첨부한 프로필 사진 / HP 공식 적용
+      const imageUrl  = pendingProfileImages.get(pkey);
       if (imageUrl) pendingProfileImages.delete(pkey);
+      const hpFormula = pendingHpFormulas.get(pkey);
+      if (hpFormula) pendingHpFormulas.delete(pkey);
 
-      const char = { ...partial, skills, traits, specialStats, tempStats: {}, ...(imageUrl ? { imageUrl } : {}) };
+      const char = {
+        ...partial, skills, traits, specialStats, tempStats: {},
+        ...(imageUrl ? { imageUrl } : {}),
+        ...(hpFormula ? { hpFormula } : {}),
+      };
       initChar(char);
       const allChars = loadJSON(CHAR_FILE);
       const book = getCharBook(allChars, interaction.guild.id, targetUid);
@@ -828,8 +871,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pkey    = pendingKey(interaction);
       const partial = pendingNPCs.get(pkey);
       if (!partial) return interaction.reply({ content: '❌ 등록 세션이 만료되었습니다. `/npc등록`을 다시 시도해주세요.', ephemeral: true });
+      const statList  = pendingStatLists.get(pkey) ?? DEFAULT_STATS;
+      const hpFormula = pendingHpFormulas.get(pkey);
       pendingNPCs.delete(pkey);
       pendingStatLists.delete(pkey);
+      pendingHpFormulas.delete(pkey);
 
       const statsRaw    = interaction.fields.getTextInputValue('stats');
       const specialRaw  = interaction.fields.getTextInputValue('specialStats');
@@ -837,14 +883,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const traitsRaw   = interaction.fields.getTextInputValue('traits');
       const memo        = interaction.fields.getTextInputValue('memo');
 
-      const statList = pendingStatLists.get(pendingKey(interaction)) ?? DEFAULT_STATS;
       let stats;
       try { stats = parseBaseStats(statsRaw, statList); } catch {
         return interaction.reply({ content: `❌ 기본스탯 형식 오류. 예) ${statList.map(()=>10).join(' ')}`, ephemeral: true });
       }
 
       const specialStats = parseSpecialStats(specialRaw);
-      const maxHP        = (stats['체력'] ?? 0) * 4;
+      // HP는 공식에 따라 계산 — 공식 없으면 기본 체력*4
+      const tmpForCalc = { stats, ...(hpFormula ? { hpFormula } : {}) };
+      const maxHP = npcMaxHP(tmpForCalc);
       const npc = {
         ...partial,
         stats,
@@ -853,6 +900,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         traits: traitsRaw.trim() ? traitsRaw.split(',').map(t => t.trim()).filter(Boolean) : [],
         description: memo.trim() || '',
         hp: { current: maxHP, max: maxHP },
+        ...(hpFormula ? { hpFormula } : {}),
         createdBy: uid,
         createdAt: new Date().toISOString(),
       };
@@ -909,6 +957,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (statErr) return interaction.reply({ content: `❌ ${statErr}`, ephemeral: true });
     pendingStatLists.set(pkey, statList);
 
+    const { formula: hpFormula, error: hpErr } = parseHpFormulaOption(interaction.options.getString('체력계산'));
+    if (hpErr) return interaction.reply({ content: `❌ 체력계산 ${hpErr}`, ephemeral: true });
+    if (hpFormula) pendingHpFormulas.set(pkey, hpFormula);
+    else pendingHpFormulas.delete(pkey);
+
     const modal = new ModalBuilder()
       .setCustomId('char_modal_1')
       .setTitle('캐릭터 등록 (1/2) — 기본 정보');
@@ -959,6 +1012,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const { list: statList, error: statErr } = parseStatOption(interaction.options.getString('스탯'));
     if (statErr) return interaction.reply({ content: `❌ ${statErr}`, ephemeral: true });
     pendingStatLists.set(pkey, statList);
+
+    const { formula: hpFormula, error: hpErr } = parseHpFormulaOption(interaction.options.getString('체력계산'));
+    if (hpErr) return interaction.reply({ content: `❌ 체력계산 ${hpErr}`, ephemeral: true });
+    if (hpFormula) pendingHpFormulas.set(pkey, hpFormula);
+    else pendingHpFormulas.delete(pkey);
 
     const modal = new ModalBuilder()
       .setCustomId('char_modal_1')
@@ -1372,9 +1430,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
   if (cmd === 'npc등록') {
     if (!isGM(member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
+    const npkey = pendingKey(interaction);
     const { list: statList, error: statErr } = parseStatOption(interaction.options.getString('스탯'));
     if (statErr) return interaction.reply({ content: `❌ ${statErr}`, ephemeral: true });
-    pendingStatLists.set(pendingKey(interaction), statList);
+    pendingStatLists.set(npkey, statList);
+    const { formula: hpFormula, error: hpErr } = parseHpFormulaOption(interaction.options.getString('체력계산'));
+    if (hpErr) return interaction.reply({ content: `❌ 체력계산 ${hpErr}`, ephemeral: true });
+    if (hpFormula) pendingHpFormulas.set(npkey, hpFormula);
+    else pendingHpFormulas.delete(npkey);
     const modal = new ModalBuilder().setCustomId('npc_modal_1').setTitle('NPC 등록 (1/2) — 기본 정보');
     modal.addComponents(
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('NPC 이름').setStyle(TextInputStyle.Short).setRequired(true)),
@@ -1434,7 +1497,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!statName || isNaN(statVal)) return interaction.reply({ content: '❌ 형식: `스탯이름 숫자`', ephemeral: true });
       npc.stats = npc.stats || {};
       npc.stats[statName] = statVal;
-      if (statName === '체력') { npc.hp = npc.hp || {}; npc.hp.max = statVal * 4; npc.hp.current = Math.min(npc.hp.current ?? npc.hp.max, npc.hp.max); }
+      // HP 공식이 이 스탯을 참조하면 max 재계산
+      const usesThisStat = !npc.hpFormula || (npc.hpFormula?.stat === statName) || (!npc.hpFormula?.fixed && statName === '체력');
+      if (usesThisStat) { npc.hp = npc.hp || {}; npc.hp.max = npcMaxHP(npc); npc.hp.current = Math.min(npc.hp.current ?? npc.hp.max, npc.hp.max); }
       resultMsg = `📈 스탯 **${statName}** → **${statVal}**`;
     } else if (field === '특수스탯') {
       const parts = rawVal.trim().split(/\s+/);
@@ -2088,7 +2153,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setTitle('📖 TRPG 봇 명령어 목록').setColor(0x3498DB)
       .addFields(
         { name: '🎲 주사위',    value: '`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-)', inline: false },
-        { name: '📊 캐릭터 (다중 프로필 지원)',    value: ['`/상태등록 [스탯:체력,근력,민첩,...] [사진:첨부]` — 새 캐릭터 프로필 생성. 스탯 이름·개수는 캐릭터마다 자유 지정', '`/프로필목록` `/프로필선택 id:N` `/프로필삭제 id:N`', '`/프로필사진 사진:첨부` — 활성 프로필 사진 설정 / `/프로필사진제거`', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
+        { name: '📊 캐릭터 (다중 프로필 지원)',    value: ['`/상태등록 [스탯:체력,근력,민첩,...] [체력계산:체력*4] [사진:첨부]` — 새 캐릭터. 스탯 이름·개수·HP 공식은 캐릭터마다 자유 지정', '`/프로필목록` `/프로필선택 id:N` `/프로필삭제 id:N`', '`/프로필사진 사진:첨부` — 활성 프로필 사진 설정 / `/프로필사진제거`', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
         { name: '⚔️ 스킬·특성·특수스탯', value: ['`/스킬추가` `/스킬제거` `/특성추가` `/특성제거`', '`/특수스탯추가` `/특수스탯제거`'].join('\n'), inline: false },
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },
         { name: '🎯 판정',      value: '`/판정 일반` `/판정 공격` `/판정 방어` `/판정 회피` `/판정 데미지`', inline: false },

@@ -942,6 +942,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
     ]});
   }
 
+  // ── 페이트 코어 주사위 (각 주사위: +1 / 0 / -1) ───────
+  if (cmd === 'pateroll') {
+    const n   = interaction.options.getInteger('개수') ?? 4;
+    const mod = interaction.options.getInteger('보정') ?? 0;
+    if (n < 1 || n > 100)
+      return interaction.reply({ content: '❌ 주사위 개수는 1~100 사이여야 합니다.', ephemeral: true });
+
+    const faces  = ['-', '0', '+'];                       // -1 / 0 / +1
+    const rolls  = Array.from({ length: n }, () => Math.floor(Math.random() * 3) - 1);
+    const sum    = rolls.reduce((a, b) => a + b, 0);
+    const total  = sum + mod;
+    const symbols = rolls.map(r => faces[r + 1]).join(' ');
+    const modStr  = mod ? ` ${mod > 0 ? '+' : '-'} ${Math.abs(mod)}` : '';
+
+    return interaction.reply({ embeds: [
+      new EmbedBuilder().setTitle('🎲 페이트 주사위 결과').setColor(0x9B59B6)
+        .addFields(
+          { name: '굴림',   value: `${symbols}`,                       inline: false },
+          { name: '주사위 합', value: `${sum >= 0 ? '+' : ''}${sum}${modStr}`, inline: true },
+          { name: '합계',   value: `**${total >= 0 ? '+' : ''}${total}**`, inline: true },
+        ).setFooter({ text: `${member.displayName}의 굴림 (${n}dF)` })
+    ]});
+  }
+
   // ── 상태등록 (Modal) ──────────────────────────────
   if (cmd === '상태등록') {
     const pkey = pendingKey(interaction);
@@ -2152,7 +2176,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const embed = new EmbedBuilder()
       .setTitle('📖 TRPG 봇 명령어 목록').setColor(0x3498DB)
       .addFields(
-        { name: '🎲 주사위',    value: '`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-)', inline: false },
+        { name: '🎲 주사위',    value: ['`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-)', '`/pateroll 개수:4 [보정:0]` — 페이트 코어 주사위(±1·0) n개 합산'].join('\n'), inline: false },
         { name: '📊 캐릭터 (다중 프로필 지원)',    value: ['`/상태등록 [스탯:체력,근력,민첩,...] [체력계산:체력*4] [사진:첨부]` — 새 캐릭터. 스탯 이름·개수·HP 공식은 캐릭터마다 자유 지정', '`/프로필목록` `/프로필선택 id:N` `/프로필삭제 id:N`', '`/프로필사진 사진:첨부` — 활성 프로필 사진 설정 / `/프로필사진제거`', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
         { name: '⚔️ 스킬·특성·특수스탯', value: ['`/스킬추가` `/스킬제거` `/특성추가` `/특성제거`', '`/특수스탯추가` `/특수스탯제거`'].join('\n'), inline: false },
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },

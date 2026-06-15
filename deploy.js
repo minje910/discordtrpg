@@ -4,6 +4,9 @@ const commands = [
   // ─── 주사위 ───
   new SlashCommandBuilder().setName('roll').setDescription('주사위를 굴립니다 (식 표현식 지원)')
     .addStringOption(o => o.setName('dice').setDescription('예) 2d6, 1d20+1d10, 2d6+5-1d4').setRequired(true)),
+  new SlashCommandBuilder().setName('pateroll').setDescription('페이트 코어 주사위(±1·0)를 굴립니다 (n개 합산)')
+    .addIntegerOption(o => o.setName('개수').setDescription('굴릴 주사위 개수 (기본 4)'))
+    .addIntegerOption(o => o.setName('보정').setDescription('합계에 더할 보정치 (선택)')),
 
   // ─── 상태창 ───
   new SlashCommandBuilder().setName('상태등록').setDescription('새 캐릭터 프로필을 등록합니다 (여러 개 가능)')

@@ -362,11 +362,27 @@ async function triggerSceneTraits(channel, guildId, newBackgrounds) {
 // - 켜져 있는 동안 그 계정은 GM 역할 없이도 모든 GM 전용 기능을 통과하고,
 //   그 계정이 실행한 모든 응답은 본인에게만 보이도록(ephemeral) 강제된다.
 
-/** 지정된 관리자 계정인지 판별 (유저명 핸들 또는 ADMIN_USER_ID) */
-function isAdminUser(user) {
+/**
+ * 지정된 관리자 계정인지 판별.
+ * 디스코드는 이름이 셋(유저명 핸들 / 표시 이름 / 서버 별명)이라 어느 쪽이든 인정한다.
+ * 셋 다 "그 계정 본인"을 가리키므로, 역할처럼 남에게 넘겨줄 수 있는 값은 검사하지 않는다.
+ * ADMIN_USER_ID를 설정해 두면 이름이 뭐로 바뀌든 그 ID로 통과한다 (가장 확실).
+ */
+function isAdminUser(user, member) {
   if (!user) return false;
   if (ADMIN_USER_ID && user.id === ADMIN_USER_ID) return true;
-  return (user.username ?? '').toLowerCase() === ADMIN_USERNAME;
+  const names = [user.username, user.globalName, member?.nickname];
+  return names.some(n => (n ?? '').toLowerCase() === ADMIN_USERNAME);
+}
+
+/** 진단용 — 봇이 이 사람을 실제로 어떻게 보고 있는지 */
+function adminIdentityDebug(user, member) {
+  return [
+    `• 유저명(핸들): \`${user?.username ?? '?'}\``,
+    `• 표시 이름: \`${user?.globalName ?? '(없음)'}\``,
+    `• 서버 별명: \`${member?.nickname ?? '(없음)'}\``,
+    `• 유저 ID: \`${user?.id ?? '?'}\``,
+  ].join('\n');
 }
 
 /** 이 길드에서 관리자 모드가 켜져 있는가 */
@@ -382,7 +398,7 @@ function setAdminMode(guildId, on, user) {
 
 /** 관리자 권한이 실제로 발동 중인가 = 지정 계정 + 이 길드에서 모드 ON */
 function adminActive(member) {
-  if (!isAdminUser(member?.user)) return false;
+  if (!isAdminUser(member?.user, member)) return false;
   const gid = member?.guild?.id;
   return !!gid && adminModeOn(gid);
 }
@@ -742,7 +758,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   //  모드가 켜져 있는 동안, 지정 계정이 실행한 인터랙션의 모든 응답을
   //  본인만 볼 수 있게(ephemeral) 강제한다. (버튼/모달 응답 포함)
   // ══════════════════════════════
-  if (interaction.guild && isAdminUser(interaction.user) && adminModeOn(interaction.guild.id)) {
+  if (interaction.guild && isAdminUser(interaction.user, interaction.member) && adminModeOn(interaction.guild.id)) {
     forceEphemeral(interaction);
   }
 
@@ -2252,8 +2268,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // ── 관리자 모드 (지정 계정 전용) ──────────────────
   if (cmd === '관리자') {
     // 지정 계정이 아니면 여기서 차단. 응답은 언제나 실행한 본인에게만 보인다.
-    if (!isAdminUser(interaction.user))
-      return interaction.reply({ content: '❌ 이 명령어는 지정된 관리자 계정만 사용할 수 있습니다.', ephemeral: true });
+    // 지정 계정이 아니면 차단. 왜 막혔는지 바로 알 수 있게 봇이 본 값을 함께 보여준다.
+    // (본인 정보만 본인에게 보여주므로 정보 노출 문제는 없다)
+    if (!isAdminUser(interaction.user, interaction.member)) {
+      const embed = new EmbedBuilder()
+        .setTitle('❌ 관리자 계정이 아닙니다').setColor(0xE74C3C)
+        .setDescription(`이 명령어는 지정된 관리자 계정만 사용할 수 있습니다.\n찾는 이름: \`${ADMIN_USERNAME}\`${ADMIN_USER_ID ? ` 또는 ID \`${ADMIN_USER_ID}\`` : ''}`)
+        .addFields({ name: '봇이 본 당신의 정보', value: adminIdentityDebug(interaction.user, interaction.member), inline: false })
+        .setFooter({ text: '본인이 맞는데 막혔다면, 위 유저 ID를 ADMIN_USER_ID 환경변수에 넣으면 확실히 통과합니다.' });
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
     if (!interaction.guild)
       return interaction.reply({ content: '❌ 관리자 모드는 서버 안에서만 사용할 수 있습니다. (데이터가 서버 단위로 저장됨)', ephemeral: true });
 
@@ -2303,8 +2327,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setColor(st?.on ? 0x2ECC71 : 0x95A5A6)
         .addFields(
           { name: '모드',     value: st?.on ? `🟢 **ON**\n켠 시각: ${st.since}` : '⚪ OFF', inline: true },
-          { name: '관리자',   value: `\`${interaction.user.username}\`\n<@${interaction.user.id}>`, inline: true },
-          { name: '식별 방식', value: ADMIN_USER_ID ? `유저 ID 고정 (\`${ADMIN_USER_ID}\`) + 유저명` : `유저명 \`${ADMIN_USERNAME}\``, inline: true },
+          { name: '통과 기준', value: `이름 \`${ADMIN_USERNAME}\` (유저명·표시이름·별명 중 하나)${ADMIN_USER_ID ? `\n또는 유저 ID \`${ADMIN_USER_ID}\`` : '\n⚠️ ADMIN_USER_ID 미설정 — 이름을 바꾸면 잠깁니다'}`, inline: false },
+          { name: '봇이 본 내 정보', value: adminIdentityDebug(interaction.user, interaction.member), inline: false },
           { name: '서버',     value: `${interaction.guild.name}\n\`${guildId}\` · 멤버 ${interaction.guild.memberCount}명`, inline: false },
           { name: '데이터',   value: [
               `• 캐릭터: 유저 ${Object.keys(charBook).length}명 / 프로필 ${profiles}개 (활성 ${actives})`,
@@ -2412,7 +2436,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setFooter({ text: '🔒 = GM 역할 필요' });
 
     // 관리자 전용 안내는 지정 계정에게만 노출한다.
-    if (isAdminUser(interaction.user)) {
+    if (isAdminUser(interaction.user, interaction.member)) {
       embed.addFields({ name: '🛡️ 관리자 모드 (내 계정 전용)', value: [
         '`/관리자 켜기` `/관리자 끄기` — 모드 ON/OFF (GM 권한 통과 + 내 응답 전부 나만 보기)',
         '`/관리자 상태` — 모드 상태 & 서버 데이터 요약',

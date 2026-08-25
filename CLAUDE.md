@@ -22,7 +22,8 @@ npm start        # deploy 후 bot 실행 (둘 다)
 - `DATA_DIR` — JSON 영속 저장 경로. 미설정 시 `./data`. (Railway Volume은 `/data` 마운트.)
 - `OPENAI_API_KEY` — `/ai판정`에서 사용. 변수명은 OPENAI지만 실제 호출 대상은 코드 확인 필요
   (`callAIJudge` / `fetch('https://api.openai.com/...')`).
-- `ADMIN_USERNAME` — 관리자 모드를 쓸 수 있는 디스코드 유저명(핸들). 미설정 시 `darkandbluefox`.
+- `ADMIN_USERNAME` — 관리자 모드를 쓸 수 있는 이름. 미설정 시 `darkandbluefox`.
+  유저명(핸들)·표시 이름(`globalName`)·서버 별명(`nickname`) 중 하나만 일치해도 통과한다.
 - `ADMIN_USER_ID` — 관리자 유저 ID (선택). 설정 시 유저명이 바뀌어도 그 ID면 통과한다.
 
 ## 구조

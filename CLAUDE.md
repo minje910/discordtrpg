@@ -22,6 +22,8 @@ npm start        # deploy 후 bot 실행 (둘 다)
 - `DATA_DIR` — JSON 영속 저장 경로. 미설정 시 `./data`. (Railway Volume은 `/data` 마운트.)
 - `OPENAI_API_KEY` — `/ai판정`에서 사용. 변수명은 OPENAI지만 실제 호출 대상은 코드 확인 필요
   (`callAIJudge` / `fetch('https://api.openai.com/...')`).
+- `ADMIN_USERNAME` — 관리자 모드를 쓸 수 있는 디스코드 유저명(핸들). 미설정 시 `darkandbluefox`.
+- `ADMIN_USER_ID` — 관리자 유저 ID (선택). 설정 시 유저명이 바뀌어도 그 ID면 통과한다.
 
 ## 구조
 
@@ -40,7 +42,8 @@ npm start        # deploy 후 bot 실행 (둘 다)
 ## 데이터 / 영속성
 
 - 저장소는 `DATA_DIR` 아래 JSON 파일들: `characters.json`, `inventory.json`,
-  `missions.json`, `npcs.json`, `combat.json`, `scenes.json`, `declarations.json`.
+  `missions.json`, `npcs.json`, `combat.json`, `scenes.json`, `declarations.json`,
+  `admin.json`(관리자 모드 ON/OFF 상태).
 - 접근은 `loadJSON(fp)` / `saveJSON(fp, data)`로만. 손상된 JSON은 `{}`로 폴백.
 - **모든 데이터는 길드 단위로 스코프된다.** 항상 `interaction.guild.id`로 분기할 것.
   - 캐릭터: `allChars[guildId][uid] = { active, profiles: { "1": charObj, ... } }`
@@ -54,6 +57,12 @@ npm start        # deploy 후 bot 실행 (둘 다)
 
 - GM 전용 기능은 `isGM(member)` (디스코드 역할 이름이 `GM`)로 가드한다.
   실패 시 `{ content: '❌ GM 역할이 필요합니다.', ephemeral: true }` 반환.
+- **관리자 모드** (`/관리자`, 길드별 ON/OFF) — `isAdminUser(user)`로 지정 계정만 통과.
+  모드가 켜져 있으면 `isGM`이 무조건 true를 반환하고, 인터랙션 핸들러 진입부의
+  `forceEphemeral(interaction)`가 `reply`/`followUp`/`deferReply`를 감싸 그 계정의
+  모든 응답을 ephemeral로 강제한다. 단 `channel.send`로 나가는 공지(전투 턴/대시보드/
+  씬 트리거)는 성격상 공개 그대로다. 관련 헬퍼: `adminModeOn`, `setAdminMode`,
+  `adminActive`, `ADMIN_DATA_FILES`.
 - 기본 스탯 7종은 `DEFAULT_STATS`, 단 스탯 이름/개수와 HP 공식은 캐릭터·NPC마다 커스텀 가능.
 - 보정치 = 능력치/2 (`calcBonus`), 판정은 d20 + 보정. 숙련도 스택(`rollProficiency`)은
   능력치 20당 d20 +1개를 굴려 최댓값 채택. 무기는 폭발 주사위(`rollExploding`).

@@ -212,6 +212,27 @@ const commands = [
   new SlashCommandBuilder().setName('ai판정').setDescription('AI가 캐릭터 시트·스킬·특성 설명을 읽고 복합 판정을 자동 계산합니다')
     .addStringOption(o => o.setName('행동').setDescription('선언할 행동 내용 (예: 정신분석 스킬로 상대의 약점을 파악한다)').setRequired(true)),
 
+  // ─── 관리자 모드 (지정 계정 전용 · 모든 응답은 본인만 보임) ───
+  new SlashCommandBuilder().setName('관리자').setDescription('관리자 모드 (지정된 계정만 사용 가능)')
+    .addSubcommand(s => s.setName('켜기').setDescription('관리자 모드 ON — GM 권한 통과 + 내 응답 전부 나만 보기'))
+    .addSubcommand(s => s.setName('끄기').setDescription('관리자 모드 OFF'))
+    .addSubcommand(s => s.setName('상태').setDescription('관리자 모드 상태와 이 서버 데이터 요약을 봅니다'))
+    .addSubcommand(s => s.setName('데이터').setDescription('저장된 원본 데이터를 조회합니다')
+      .addStringOption(o => o.setName('종류').setDescription('조회할 데이터').setRequired(true)
+        .addChoices(
+          { name: '캐릭터', value: '캐릭터' }, { name: '인벤토리', value: '인벤토리' }, { name: '미션', value: '미션' },
+          { name: 'NPC', value: 'NPC' }, { name: '전투', value: '전투' }, { name: '씬', value: '씬' },
+          { name: '행동선언', value: '행동선언' }))
+      .addUserOption(o => o.setName('유저').setDescription('캐릭터/인벤토리 조회 시 특정 유저만')))
+    .addSubcommand(s => s.setName('백업').setDescription('이 서버의 모든 데이터를 JSON 파일로 내보냅니다'))
+    .addSubcommand(s => s.setName('초기화').setDescription('이 서버의 데이터를 삭제합니다 (되돌릴 수 없음)')
+      .addStringOption(o => o.setName('종류').setDescription('삭제할 데이터').setRequired(true)
+        .addChoices(
+          { name: '캐릭터', value: '캐릭터' }, { name: '인벤토리', value: '인벤토리' }, { name: '미션', value: '미션' },
+          { name: 'NPC', value: 'NPC' }, { name: '전투', value: '전투' }, { name: '씬', value: '씬' },
+          { name: '행동선언', value: '행동선언' }, { name: '전체', value: '전체' }))
+      .addStringOption(o => o.setName('확인').setDescription('정말 삭제하려면 "확인" 이라고 입력').setRequired(true))),
+
   new SlashCommandBuilder().setName('도움말').setDescription('봇의 모든 명령어 목록을 봅니다'),
 ].map(c => c.toJSON());
 

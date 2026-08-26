@@ -71,6 +71,10 @@ npm start        # deploy 후 bot 실행 (둘 다)
 
 ## 주사위 헬퍼
 
-- `rollDice(n, s)` — n개의 s면체. `evalRollExpression` — `2d6+5-1d4` 같은 식 파서(`/roll`).
+- `rollDice(n, s)` — n개의 s면체. **모든 굴림의 단일 통로**이므로 새 굴림도 여기를 쓸 것.
+  `consumeForcedRoll(s)`이 관리자 주사위 고정을 여기서 가로챈다. 굴림 주체는 `rollCtx`
+  (`AsyncLocalStorage`)로 전달되며, 인터랙션 핸들러 진입부에서 `{guildId, userId}`를 심는다.
+  컨텍스트 밖(타이머 등)에서 굴리면 고정이 적용되지 않고 정상 무작위가 된다.
+- `evalRollExpression` — `2d6+5-1d4` 같은 식 파서(`/roll`).
 - `/pateroll` — 페이트 코어(Fudge) 주사위. 각 주사위가 -1/0/+1 중 하나, n개(기본 4) 굴려 합산.
   `개수`(1~100)와 선택 `보정` 옵션을 받는다.

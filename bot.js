@@ -11,6 +11,11 @@ const {
 } = require('discord.js');
 const fs   = require('fs');
 const path = require('path');
+const { AsyncLocalStorage } = require('node:async_hooks');
+
+// 지금 굴리는 주체가 누구인지(길드·유저) rollDice가 알 수 있게 해주는 컨텍스트.
+// await를 넘어가도 유지되고 길드끼리 섞이지 않는다 — 주사위 고정 판단에 쓴다.
+const rollCtx = new AsyncLocalStorage();
 
 // ───────────────────────────────────────────
 //  상수 & 파일 경로
@@ -463,7 +468,33 @@ function hpFormulaLabel(formula) {
   return `${formula.stat} × ${formula.mult ?? 4}`;
 }
 function requiredExp(lv)   { return lv * 10; }
-function rollDice(n, s)    { return Array.from({ length: n }, () => Math.floor(Math.random() * s) + 1); }
+/**
+ * 주사위 고정 — 관리자 모드가 켜진 길드에서 지정된 값이 나오게 한다.
+ * 주사위 1개당 1회 소모. remaining < 0 이면 해제할 때까지 무제한.
+ * 고정값이 면수를 넘으면 그 주사위의 최대값으로 맞춘다 (예: 20 고정 + d6 → 6).
+ * 반환 null이면 고정 없음 → 평소대로 무작위.
+ */
+function consumeForcedRoll(sides) {
+  const ctx = rollCtx.getStore();
+  if (!ctx?.guildId) return null;
+
+  const all = loadJSON(ADMIN_FILE);
+  const st  = all[ctx.guildId];
+  const f   = st?.on ? st.forced : null;          // 모드를 끄면 고정도 자동 해제
+  if (!f) return null;
+  if (f.scope === '나만' && f.by !== ctx.userId) return null;
+
+  if (f.remaining >= 0) {
+    f.remaining--;
+    if (f.remaining <= 0) delete st.forced;
+    saveJSON(ADMIN_FILE, all);
+  }
+  return Math.min(Math.max(f.value, 1), sides);
+}
+
+function rollDice(n, s) {
+  return Array.from({ length: n }, () => consumeForcedRoll(s) ?? Math.floor(Math.random() * s) + 1);
+}
 
 // 보정치: 능력치 / 2 (소수점 1자리까지 표현. 정수면 정수, .5면 .5)
 function calcBonus(stat) {
@@ -750,7 +781,13 @@ function pendingKey(interaction) { return `${interaction.guild.id}:${interaction
 // ───────────────────────────────────────────
 //  인터랙션 핸들러
 // ───────────────────────────────────────────
-client.on(Events.InteractionCreate, async (interaction) => {
+// 인터랙션마다 굴림 컨텍스트를 심고 실제 처리를 호출한다 (rollDice의 주사위 고정 판단용).
+client.on(Events.InteractionCreate, (interaction) => {
+  const ctx = { guildId: interaction.guild?.id ?? null, userId: interaction.user?.id ?? null };
+  return rollCtx.run(ctx, () => handleInteraction(interaction));
+});
+
+async function handleInteraction(interaction) {
  try {
 
   // ══════════════════════════════
@@ -1044,7 +1081,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.reply({ content: '❌ 주사위 개수는 1~100 사이여야 합니다.', ephemeral: true });
 
     const faces  = ['-', '0', '+'];                       // -1 / 0 / +1
-    const rolls  = Array.from({ length: n }, () => Math.floor(Math.random() * 3) - 1);
+    // rollDice(n, 3)의 1·2·3을 -1·0·+1로 옮긴다 — 이러면 주사위 고정도 그대로 적용된다.
+    const rolls  = rollDice(n, 3).map(v => v - 2);
     const sum    = rolls.reduce((a, b) => a + b, 0);
     const total  = sum + mod;
     const symbols = rolls.map(r => faces[r + 1]).join(' ');
@@ -2336,9 +2374,49 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `• 전투: ${cs?.active ? `진행 중 (라운드 ${cs.round}, 참가 ${cs.participants?.length ?? 0})` : '없음'}`,
               `• 씬: ${scene?.backgrounds?.length ? scene.backgrounds.join(', ') : '미설정'}`,
             ].join('\n'), inline: false },
+          { name: '주사위 고정', value: st?.forced
+              ? `🎯 **${st.forced.value}** 고정 중 · 남은 ${st.forced.remaining < 0 ? '무제한' : `${st.forced.remaining}개`} · 대상 ${st.forced.scope}`
+              : '없음 (정상 무작위)', inline: false },
           { name: '저장 경로', value: `\`${DATA_DIR}\`${process.env.DATA_DIR ? '' : ' ⚠️ 휘발성 (DATA_DIR 미설정)'}`, inline: false },
         );
       return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    // ── 주사위 고정 ──
+    if (sub === '주사위고정') {
+      if (!adminModeOn(guildId))
+        return interaction.reply({ content: '❌ 먼저 `/관리자 켜기`로 모드를 켜주세요. (모드를 끄면 주사위 고정도 함께 풀립니다)', ephemeral: true });
+
+      const value = interaction.options.getInteger('값');
+      const count = interaction.options.getInteger('횟수') ?? 1;
+      const scope = interaction.options.getString('대상') ?? '나만';
+      if (value < 1)   return interaction.reply({ content: '❌ 고정값은 1 이상이어야 합니다. (주사위 면수보다 크면 그 주사위의 최대값으로 맞춰집니다)', ephemeral: true });
+      if (count < 0 || count > 999) return interaction.reply({ content: '❌ 횟수는 0~999 사이여야 합니다. (0 = 해제할 때까지 무제한)', ephemeral: true });
+
+      const all = loadJSON(ADMIN_FILE);
+      all[guildId].forced = { value, remaining: count === 0 ? -1 : count, scope, by: interaction.user.id };
+      saveJSON(ADMIN_FILE, all);
+
+      const embed = new EmbedBuilder()
+        .setTitle('🎯 주사위 고정 ON').setColor(0xE67E22)
+        .addFields(
+          { name: '고정값', value: `**${value}**`, inline: true },
+          { name: '남은 횟수', value: count === 0 ? '무제한' : `주사위 **${count}개**`, inline: true },
+          { name: '대상', value: scope === '전체' ? '이 서버의 **모든 사람**' : '**나만**', inline: true },
+          { name: '적용 범위', value: '판정·공격·데미지·숙련도 스택·이니셔티브·`/roll`·`/pateroll`·`/ai판정`\n> 주사위 **1개당 1회** 소모됩니다. 숙련도 스택으로 2개를 굴리면 2회 소모됩니다.\n> 면수보다 큰 값은 최대값으로 맞춰집니다 (20 고정 + d6 → 6).', inline: false },
+          { name: '해제', value: '`/관리자 주사위해제` 또는 `/관리자 끄기`', inline: false },
+        );
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    // ── 주사위 고정 해제 ──
+    if (sub === '주사위해제') {
+      const all = loadJSON(ADMIN_FILE);
+      if (!all[guildId]?.forced)
+        return interaction.reply({ content: 'ℹ️ 설정된 주사위 고정이 없습니다.', ephemeral: true });
+      delete all[guildId].forced;
+      saveJSON(ADMIN_FILE, all);
+      return interaction.reply({ content: '🎲 주사위 고정을 해제했습니다. 이제 정상적으로 무작위로 굴러갑니다.', ephemeral: true });
     }
 
     // ── 데이터 조회 ──
@@ -2440,6 +2518,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       embed.addFields({ name: '🛡️ 관리자 모드 (내 계정 전용)', value: [
         '`/관리자 켜기` `/관리자 끄기` — 모드 ON/OFF (GM 권한 통과 + 내 응답 전부 나만 보기)',
         '`/관리자 상태` — 모드 상태 & 서버 데이터 요약',
+        '`/관리자 주사위고정 값:20 [횟수:1] [대상:나만|전체]` — 굴림 결과 고정 / `/관리자 주사위해제`',
         '`/관리자 데이터 종류:캐릭터 [유저:@철수]` — 원본 데이터 조회',
         '`/관리자 백업` — 이 서버 데이터를 JSON 파일로 내보내기',
         '`/관리자 초기화 종류:전투 확인:확인` — 이 서버 데이터 삭제 (되돌릴 수 없음)',
@@ -2456,7 +2535,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     else await interaction.reply(payload);
   } catch (e) { console.error('에러 응답 전송 실패:', e); }
  }
-});
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  🤖 AI 판정 — 핵심 함수

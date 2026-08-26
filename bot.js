@@ -7,7 +7,7 @@
 const {
   Client, GatewayIntentBits, EmbedBuilder, Events,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
-  ButtonBuilder, ButtonStyle, AttachmentBuilder,
+  ButtonBuilder, ButtonStyle, AttachmentBuilder, PermissionFlagsBits,
 } = require('discord.js');
 const fs   = require('fs');
 const path = require('path');
@@ -53,6 +53,7 @@ const GOOGLE_API_KEY  = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY
 const GEMINI_MODEL    = process.env.GEMINI_MODEL   || 'gemini-2.5-flash';
 const SUMMARY_MAX_MSGS  = 300;   // 한 번에 읽어올 수 있는 메시지 상한
 const SUMMARY_MAX_CHARS = 14000; // AI에 넘길 로그 길이 상한 (넘으면 오래된 줄부터 버림)
+const SUMMARY_MAX_HOURS = 24;    // 최대 기한 = 하루. 이보다 오래된 로그는 읽지 않는다.
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -2337,35 +2338,59 @@ async function handleInteraction(interaction) {
           '> 2. Railway → Variables 에 `GOOGLE_API_KEY` = 발급받은 키 를 추가하면 바로 됩니다.',
         ].join('\n'), ephemeral: true });
 
+    // 요약은 채널 하나를 대상으로 한다. 지정하지 않으면 지금 이 채널.
+    const target = interaction.options.getChannel('채널') ?? interaction.channel;
+    if (!target?.isTextBased?.() || target.isVoiceBased?.())
+      return interaction.reply({ content: '❌ 텍스트 채널(또는 스레드)만 요약할 수 있습니다.', ephemeral: true });
+
+    // 요청자가 못 보는 채널을 대신 읽어주면 안 된다 — 사람 기준으로 먼저 막는다.
+    const userPerms = target.permissionsFor?.(interaction.member);
+    if (!userPerms?.has(PermissionFlagsBits.ViewChannel) || !userPerms.has(PermissionFlagsBits.ReadMessageHistory))
+      return interaction.reply({ content: `❌ ${target} 채널을 볼 권한이 없습니다.`, ephemeral: true });
+    const botPerms = target.permissionsFor?.(interaction.guild.members.me);
+    if (botPerms && (!botPerms.has(PermissionFlagsBits.ViewChannel) || !botPerms.has(PermissionFlagsBits.ReadMessageHistory)))
+      return interaction.reply({ content: `❌ 봇이 ${target} 채널의 **메시지 기록 보기** 권한을 가지고 있지 않습니다.`, ephemeral: true });
+
+    // 기한은 최대 하루. 그보다 오래된 대화는 아예 읽지 않는다.
+    const hours  = Math.min(Math.max(interaction.options.getInteger('시간') ?? SUMMARY_MAX_HOURS, 1), SUMMARY_MAX_HOURS);
     const limit  = Math.min(Math.max(interaction.options.getInteger('개수') ?? 100, 10), SUMMARY_MAX_MSGS);
     const focus  = interaction.options.getString('초점');
     const hidden = interaction.options.getBoolean('나만보기') ?? false;
+    const sinceTs     = Date.now() - hours * 60 * 60 * 1000;
+    const periodLabel = hours >= SUMMARY_MAX_HOURS ? '최근 24시간(최대)' : `최근 ${hours}시간`;
 
     await interaction.deferReply({ ephemeral: hidden });
 
     let log;
     try {
-      log = await fetchChannelLog(interaction.channel, limit);
+      log = await fetchChannelLog(target, limit, sinceTs);
     } catch (e) {
       console.error('로그 읽기 오류:', e);
-      return interaction.editReply({ content: `❌ 채널 로그를 읽지 못했습니다. 봇에게 **메시지 기록 보기** 권한이 있는지 확인해주세요.\n\`\`\`${e.message}\`\`\`` });
+      return interaction.editReply({ content: `❌ ${target} 채널 로그를 읽지 못했습니다. 봇에게 **메시지 기록 보기** 권한이 있는지 확인해주세요.\n\`\`\`${e.message}\`\`\`` });
     }
     if (!log.used)
-      return interaction.editReply({ content: '❌ 요약할 내용이 없습니다. 이 채널에서 읽을 수 있는 최근 대화가 비어 있습니다.' });
+      return interaction.editReply({ content: `❌ 요약할 내용이 없습니다. ${target} 채널의 ${periodLabel} 대화가 비어 있습니다. (하루보다 오래된 로그는 읽지 않습니다)` });
 
     let summary;
     try {
-      summary = await callGeminiSummary(GOOGLE_API_KEY, log.text, buildSituationContext(interaction.guild.id), focus);
+      summary = await callGeminiSummary(GOOGLE_API_KEY, {
+        logText:     log.text,
+        stateText:   buildSituationContext(interaction.guild.id),
+        focus,
+        channelName: target.name ?? '채널',
+        periodLabel,
+      });
     } catch (e) {
       console.error('AI 요약 오류:', e);
       return interaction.editReply({ content: `❌ AI 요약 중 오류가 발생했습니다.\n\`\`\`${String(e.message).slice(0, 800)}\`\`\`` });
     }
 
     const embed = new EmbedBuilder()
-      .setTitle('🧾 상황 요약')
+      .setTitle(`🧾 #${target.name ?? '채널'} 상황 요약`)
       .setColor(0x4285F4)
       .setDescription(summary.slice(0, 4000))
-      .setFooter({ text: `메시지 ${log.used}개${log.dropped ? ` (오래된 ${log.dropped}개는 길이 초과로 제외)` : ''} · ${log.range} KST · ${GEMINI_MODEL}` });
+      .addFields({ name: '요약 범위', value: `${target} · ${periodLabel} · 메시지 ${log.used}개${log.dropped ? ` (오래된 ${log.dropped}개는 길이 초과로 제외)` : ''}\n${log.range} KST`, inline: false })
+      .setFooter({ text: `채널별 요약 · 최대 기한 ${SUMMARY_MAX_HOURS}시간 · ${GEMINI_MODEL}` });
     if (focus) embed.addFields({ name: '요약 초점', value: focus.slice(0, 1000), inline: false });
 
     return interaction.editReply({ embeds: [embed] });
@@ -2572,7 +2597,12 @@ async function handleInteraction(interaction) {
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },
         { name: '🎯 판정',      value: '`/판정 일반` `/판정 공격` `/판정 방어` `/판정 회피` `/판정 데미지`', inline: false },
         { name: '🤖 AI 판정',   value: ['`/ai판정 행동:[내용]` — AI가 캐릭터 시트·스킬·특성 설명을 읽고 복합 판정 자동 계산', '> 스킬이 능력치 2개를 쓰거나 특성 조건이 복잡해도 AI가 유연하게 처리'].join('\n'), inline: false },
-        { name: '🧾 상황 요약',  value: ['`/요약 [개수:100] [초점] [나만보기]` — 최근 채널 로그를 구글 AI로 읽어 지금 상황 정리', '> 씬 배경·전투 턴·HP·선언된 행동 등 봇에 저장된 상태도 함께 반영됩니다'].join('\n'), inline: false },
+        { name: '🧾 상황 요약',  value: [
+            '`/요약` — 지금 이 채널의 최근 하루 대화를 구글 AI로 읽어 상황 정리',
+            '`/요약 채널:#전투방 시간:6` — 채널별로 따로 확인 (기한은 최대 하루)',
+            '> 옵션 `[개수:100]` 읽을 메시지 수 · `[초점]` 집중할 부분 · `[나만보기]`',
+            '> 씬 배경·전투 턴·HP·선언된 행동 등 봇에 저장된 상태도 함께 반영됩니다',
+          ].join('\n'), inline: false },
         { name: '⚔️ 전투 (내추럴 하이 스피드)', value: ['`/전투시작` 🔒 — 이니셔티브 자동 굴림 & 턴 순서 정렬', '`/다음턴` 🔒 — 다음 턴 (10분 무응답 시 자동 스킵)', '`/전투현황` — 현재 HP 대시보드', '`/전투종료` 🔒', '`/공격 [NPC ID] [능력치] [주사위]` — 명중 격차 + 폭발 무기 + Nat20 ×2. 명중 시 연속 공격 가능'].join('\n'), inline: false },
         { name: '🌄 씬',        value: ['`/씬설정` 🔒 — 배경 설정 + 특성 자동 트리거 알림', '`/씬현황` `/씬초기화` 🔒'].join('\n'), inline: false },
         { name: '📋 행동 선언', value: ['`/행동선언 [행동]` — 다음 턴 행동 미리 제출 (8명 진행 가속)', '`/행동확인` 🔒 `/행동초기화` 🔒'].join('\n'), inline: false },
@@ -2690,17 +2720,22 @@ function kstStamp(ts) {
 }
 
 /**
- * 채널의 최근 메시지를 오래된 것부터 정렬해 한 덩어리 로그 텍스트로 만든다.
+ * 한 채널의 최근 메시지를 오래된 것부터 정렬해 한 덩어리 로그 텍스트로 만든다.
  * 디스코드 fetch는 한 번에 100개가 최대라 before 커서로 이어받는다.
+ * sinceTs보다 오래된 메시지는 버리고 거기서 페이징을 멈춘다 (최대 하루 = SUMMARY_MAX_HOURS).
  * 길이가 넘치면 오래된 줄부터 버려 최신 대화를 남긴다.
  */
-async function fetchChannelLog(channel, limit) {
+async function fetchChannelLog(channel, limit, sinceTs) {
   const msgs = [];
-  let before;
+  let before, reachedCutoff = false;
   while (msgs.length < limit) {
     const batch = await channel.messages.fetch({ limit: Math.min(100, limit - msgs.length), ...(before ? { before } : {}) });
     if (!batch.size) break;
-    msgs.push(...batch.values());
+    for (const m of batch.values()) {
+      if (m.createdTimestamp < sinceTs) { reachedCutoff = true; continue; } // 기한 밖 — 버린다
+      msgs.push(m);
+    }
+    if (reachedCutoff) break;            // 이 배치에서 기한을 넘었으니 더 과거는 볼 필요 없다
     before = batch.last().id;
     if (batch.size < 100) break;
   }
@@ -2778,7 +2813,7 @@ function buildSituationContext(guildId) {
  * Google AI(Gemini)에 로그를 넘겨 상황 요약을 받아온다.
  * 로그는 어디까지나 "요약 대상 데이터"이지 지시문이 아니다 — 시스템 프롬프트에 못 박아 둔다.
  */
-async function callGeminiSummary(apiKey, logText, stateText, focus) {
+async function callGeminiSummary(apiKey, { logText, stateText, focus, channelName, periodLabel }) {
   const systemPrompt = `당신은 TRPG 세션의 기록 담당입니다. 디스코드 채널 로그와 봇에 저장된 현재 상태를 읽고, 지금 상황을 한국어로 정리합니다.
 
 ## 규칙
@@ -2805,10 +2840,11 @@ async function callGeminiSummary(apiKey, logText, stateText, focus) {
 - 아직 정리되지 않은 떡밥, 다음에 확인할 것`;
 
   const userPrompt = [
-    '## 봇에 저장된 현재 상태', stateText, '',
-    '## 채널 로그 (오래된 → 최신)', logText, '',
+    `## 요약 대상\n#${channelName} 채널 · ${periodLabel} 동안의 대화`, '',
+    '## 봇에 저장된 현재 상태 (서버 전체 공용)', stateText, '',
+    `## #${channelName} 채널 로그 (오래된 → 최신)`, logText, '',
     focus ? `## 특별히 집중해 달라는 부분\n${focus}\n` : '',
-    '위 자료를 바탕으로 지금 상황을 정리하세요.',
+    `위 자료를 바탕으로 #${channelName} 채널에서 지금 벌어지는 상황을 정리하세요. 다른 채널의 일은 알 수 없으니 언급하지 마세요.`,
   ].filter(Boolean).join('\n');
 
   const body = {

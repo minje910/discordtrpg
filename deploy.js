@@ -1,4 +1,4 @@
-const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { REST, Routes, SlashCommandBuilder, ChannelType } = require('discord.js');
 
 const commands = [
   // ─── 주사위 ───
@@ -213,7 +213,10 @@ const commands = [
     .addStringOption(o => o.setName('행동').setDescription('선언할 행동 내용 (예: 정신분석 스킬로 상대의 약점을 파악한다)').setRequired(true)),
 
   // ─── 상황 요약 (Google AI) ───
-  new SlashCommandBuilder().setName('요약').setDescription('최근 채널 로그를 구글 AI로 읽어 지금 상황을 정리합니다')
+  new SlashCommandBuilder().setName('요약').setDescription('채널 하나의 최근 로그(최대 하루)를 구글 AI로 읽어 상황을 정리합니다')
+    .addChannelOption(o => o.setName('채널').setDescription('요약할 채널 (기본: 지금 이 채널)')
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread))
+    .addIntegerOption(o => o.setName('시간').setDescription('몇 시간 전까지 읽을지 (기본 24 = 하루, 최대 24)').setMinValue(1).setMaxValue(24))
     .addIntegerOption(o => o.setName('개수').setDescription('읽어올 최근 메시지 수 (기본 100, 최대 300)').setMinValue(10).setMaxValue(300))
     .addStringOption(o => o.setName('초점').setDescription('특별히 집중할 부분 (예: 전투 상황만, NPC 대화 위주)'))
     .addBooleanOption(o => o.setName('나만보기').setDescription('요약을 나에게만 보이게 (기본: 채널에 공개)')),

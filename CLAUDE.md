@@ -24,7 +24,8 @@ npm start        # deploy 후 bot 실행 (둘 다)
   (`callAIJudge` / `fetch('https://api.openai.com/...')`).
 - `ADMIN_USERNAME` — 관리자 모드를 쓸 수 있는 이름. 미설정 시 `darkandbluefox`.
   유저명(핸들)·표시 이름(`globalName`)·서버 별명(`nickname`) 중 하나만 일치해도 통과한다.
-- `ADMIN_USER_ID` — 관리자 유저 ID (선택). 설정 시 유저명이 바뀌어도 그 ID면 통과한다.
+- `ADMIN_USER_ID` — 관리자 유저 ID 추가분 (선택, 쉼표로 여러 개). 코드에 박힌
+  `DEFAULT_ADMIN_IDS`(`1478976871617134773`)에 더해진다. ID는 이름이 바뀌어도 통과한다.
 
 ## 구조
 
@@ -75,6 +76,10 @@ npm start        # deploy 후 bot 실행 (둘 다)
   `consumeForcedRoll(s)`이 관리자 주사위 고정을 여기서 가로챈다. 굴림 주체는 `rollCtx`
   (`AsyncLocalStorage`)로 전달되며, 인터랙션 핸들러 진입부에서 `{guildId, userId}`를 심는다.
   컨텍스트 밖(타이머 등)에서 굴리면 고정이 적용되지 않고 정상 무작위가 된다.
+- `rollOne(s)` — 주사위 1개를 `{ value, forced }`로 반환. `rollDice`와 `rollExploding`이 쓴다.
+  `rollExploding`은 `forced`인 굴림을 폭발시키지 않는다 (무제한 고정이면 끝없이 터지므로).
+- `/관리자 주사위고정 값:N` 기본값은 **대상 전체 · 횟수 무제한** — 해제 전까지 그 길드의
+  모든 굴림이 N이 된다. `횟수`/`대상` 옵션으로 좁힐 수 있다.
 - `evalRollExpression` — `2d6+5-1d4` 같은 식 파서(`/roll`).
 - `/pateroll` — 페이트 코어(Fudge) 주사위. 각 주사위가 -1/0/+1 중 하나, n개(기본 4) 굴려 합산.
   `개수`(1~100)와 선택 `보정` 옵션을 받는다.

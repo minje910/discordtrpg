@@ -25,7 +25,13 @@ const GM_ROLE         = 'GM';
 // 기본은 디스코드 유저명(핸들) 'darkandbluefox'. 유저명이 바뀔 수 있으므로
 // ADMIN_USER_ID env로 유저 ID를 박아두면 그쪽도 함께 허용된다.
 const ADMIN_USERNAME  = (process.env.ADMIN_USERNAME || 'darkandbluefox').toLowerCase();
-const ADMIN_USER_ID   = process.env.ADMIN_USER_ID || null;
+// 기본으로 인정하는 관리자 유저 ID. 이름이 바뀌어도 ID는 안 바뀌므로 이쪽이 확실하다.
+// ADMIN_USER_ID env에 넣은 ID(쉼표로 여러 개 가능)는 여기에 더해진다.
+const DEFAULT_ADMIN_IDS = ['1478976871617134773'];
+const ADMIN_USER_IDS  = [...new Set([
+  ...DEFAULT_ADMIN_IDS,
+  ...(process.env.ADMIN_USER_ID || '').split(',').map(s => s.trim()).filter(Boolean),
+])];
 // DATA_DIR: Railway Volume 등 영속 저장소 경로를 env로 지정하면 그쪽에 저장됨.
 // (Railway: Volume 추가 후 Mount Path /data, env DATA_DIR=/data)
 const DATA_DIR        = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -371,11 +377,11 @@ async function triggerSceneTraits(channel, guildId, newBackgrounds) {
  * 지정된 관리자 계정인지 판별.
  * 디스코드는 이름이 셋(유저명 핸들 / 표시 이름 / 서버 별명)이라 어느 쪽이든 인정한다.
  * 셋 다 "그 계정 본인"을 가리키므로, 역할처럼 남에게 넘겨줄 수 있는 값은 검사하지 않는다.
- * ADMIN_USER_ID를 설정해 두면 이름이 뭐로 바뀌든 그 ID로 통과한다 (가장 확실).
+ * 등록된 관리자 유저 ID(ADMIN_USER_IDS)면 이름이 뭐로 바뀌든 통과한다 (가장 확실).
  */
 function isAdminUser(user, member) {
   if (!user) return false;
-  if (ADMIN_USER_ID && user.id === ADMIN_USER_ID) return true;
+  if (ADMIN_USER_IDS.includes(user.id)) return true;
   const names = [user.username, user.globalName, member?.nickname];
   return names.some(n => (n ?? '').toLowerCase() === ADMIN_USERNAME);
 }
@@ -492,8 +498,15 @@ function consumeForcedRoll(sides) {
   return Math.min(Math.max(f.value, 1), sides);
 }
 
+/** 주사위 1개 — 고정값이 걸렸는지도 함께 알려준다 (폭발 주사위 판단용) */
+function rollOne(sides) {
+  const forced = consumeForcedRoll(sides);
+  if (forced != null) return { value: forced, forced: true };
+  return { value: Math.floor(Math.random() * sides) + 1, forced: false };
+}
+
 function rollDice(n, s) {
-  return Array.from({ length: n }, () => consumeForcedRoll(s) ?? Math.floor(Math.random() * s) + 1);
+  return Array.from({ length: n }, () => rollOne(s).value);
 }
 
 // 보정치: 능력치 / 2 (소수점 1자리까지 표현. 정수면 정수, .5면 .5)
@@ -520,9 +533,10 @@ function rollExploding(count, sides) {
   const all = [];
   let pending = count, safety = 100;
   while (pending > 0 && safety-- > 0) {
-    const rolls = rollDice(pending, sides);
-    all.push(...rolls);
-    pending = rolls.filter(r => r === sides).length;
+    const results = Array.from({ length: pending }, () => rollOne(sides));
+    all.push(...results.map(r => r.value));
+    // 고정된 굴림은 폭발시키지 않는다. (예: 20 고정 + d6 → 매번 6이라 무한히 터진다)
+    pending = results.filter(r => !r.forced && r.value === sides).length;
   }
   return all;
 }
@@ -2311,7 +2325,7 @@ async function handleInteraction(interaction) {
     if (!isAdminUser(interaction.user, interaction.member)) {
       const embed = new EmbedBuilder()
         .setTitle('❌ 관리자 계정이 아닙니다').setColor(0xE74C3C)
-        .setDescription(`이 명령어는 지정된 관리자 계정만 사용할 수 있습니다.\n찾는 이름: \`${ADMIN_USERNAME}\`${ADMIN_USER_ID ? ` 또는 ID \`${ADMIN_USER_ID}\`` : ''}`)
+        .setDescription(`이 명령어는 지정된 관리자 계정만 사용할 수 있습니다.\n찾는 이름: \`${ADMIN_USERNAME}\`\n허용 ID: ${ADMIN_USER_IDS.map(id => `\`${id}\``).join(', ')}`)
         .addFields({ name: '봇이 본 당신의 정보', value: adminIdentityDebug(interaction.user, interaction.member), inline: false })
         .setFooter({ text: '본인이 맞는데 막혔다면, 위 유저 ID를 ADMIN_USER_ID 환경변수에 넣으면 확실히 통과합니다.' });
       return interaction.reply({ embeds: [embed], ephemeral: true });
@@ -2365,7 +2379,7 @@ async function handleInteraction(interaction) {
         .setColor(st?.on ? 0x2ECC71 : 0x95A5A6)
         .addFields(
           { name: '모드',     value: st?.on ? `🟢 **ON**\n켠 시각: ${st.since}` : '⚪ OFF', inline: true },
-          { name: '통과 기준', value: `이름 \`${ADMIN_USERNAME}\` (유저명·표시이름·별명 중 하나)${ADMIN_USER_ID ? `\n또는 유저 ID \`${ADMIN_USER_ID}\`` : '\n⚠️ ADMIN_USER_ID 미설정 — 이름을 바꾸면 잠깁니다'}`, inline: false },
+          { name: '통과 기준', value: `이름 \`${ADMIN_USERNAME}\` (유저명·표시이름·별명 중 하나)\n또는 유저 ID ${ADMIN_USER_IDS.map(id => `\`${id}\``).join(', ')}`, inline: false },
           { name: '봇이 본 내 정보', value: adminIdentityDebug(interaction.user, interaction.member), inline: false },
           { name: '서버',     value: `${interaction.guild.name}\n\`${guildId}\` · 멤버 ${interaction.guild.memberCount}명`, inline: false },
           { name: '데이터',   value: [
@@ -2387,9 +2401,11 @@ async function handleInteraction(interaction) {
       if (!adminModeOn(guildId))
         return interaction.reply({ content: '❌ 먼저 `/관리자 켜기`로 모드를 켜주세요. (모드를 끄면 주사위 고정도 함께 풀립니다)', ephemeral: true });
 
+      // 기본값 = 이 서버의 모든 굴림을 해제할 때까지 계속 고정.
+      // 특정 개수만 고정하고 싶으면 횟수, 내 굴림만 고정하려면 대상 옵션을 쓴다.
       const value = interaction.options.getInteger('값');
-      const count = interaction.options.getInteger('횟수') ?? 1;
-      const scope = interaction.options.getString('대상') ?? '나만';
+      const count = interaction.options.getInteger('횟수') ?? 0;
+      const scope = interaction.options.getString('대상') ?? '전체';
       if (value < 1)   return interaction.reply({ content: '❌ 고정값은 1 이상이어야 합니다. (주사위 면수보다 크면 그 주사위의 최대값으로 맞춰집니다)', ephemeral: true });
       if (count < 0 || count > 999) return interaction.reply({ content: '❌ 횟수는 0~999 사이여야 합니다. (0 = 해제할 때까지 무제한)', ephemeral: true });
 
@@ -2401,9 +2417,9 @@ async function handleInteraction(interaction) {
         .setTitle('🎯 주사위 고정 ON').setColor(0xE67E22)
         .addFields(
           { name: '고정값', value: `**${value}**`, inline: true },
-          { name: '남은 횟수', value: count === 0 ? '무제한' : `주사위 **${count}개**`, inline: true },
+          { name: '적용 범위', value: count === 0 ? '해제할 때까지 **모든 굴림**' : `주사위 **${count}개**만`, inline: true },
           { name: '대상', value: scope === '전체' ? '이 서버의 **모든 사람**' : '**나만**', inline: true },
-          { name: '적용 범위', value: '판정·공격·데미지·숙련도 스택·이니셔티브·`/roll`·`/pateroll`·`/ai판정`\n> 주사위 **1개당 1회** 소모됩니다. 숙련도 스택으로 2개를 굴리면 2회 소모됩니다.\n> 면수보다 큰 값은 최대값으로 맞춰집니다 (20 고정 + d6 → 6).', inline: false },
+          { name: '적용되는 곳', value: '판정·공격·데미지·숙련도 스택·이니셔티브·`/roll`·`/pateroll`·`/ai판정` — 주사위를 굴리는 모든 명령\n> 면수보다 큰 값은 최대값으로 맞춰집니다 (20 고정 + d6 → 6).\n> 고정된 굴림은 폭발 주사위로 다시 터지지 않습니다.', inline: false },
           { name: '해제', value: '`/관리자 주사위해제` 또는 `/관리자 끄기`', inline: false },
         );
       return interaction.reply({ embeds: [embed], ephemeral: true });
@@ -2518,7 +2534,8 @@ async function handleInteraction(interaction) {
       embed.addFields({ name: '🛡️ 관리자 모드 (내 계정 전용)', value: [
         '`/관리자 켜기` `/관리자 끄기` — 모드 ON/OFF (GM 권한 통과 + 내 응답 전부 나만 보기)',
         '`/관리자 상태` — 모드 상태 & 서버 데이터 요약',
-        '`/관리자 주사위고정 값:20 [횟수:1] [대상:나만|전체]` — 굴림 결과 고정 / `/관리자 주사위해제`',
+        '`/관리자 주사위고정 값:20` — 해제할 때까지 이 서버의 **모든 굴림**을 그 값으로 고정',
+        '> 옵션 `[횟수:N]` 주사위 N개만 · `[대상:나만]` 내 굴림만 / 해제: `/관리자 주사위해제`',
         '`/관리자 데이터 종류:캐릭터 [유저:@철수]` — 원본 데이터 조회',
         '`/관리자 백업` — 이 서버 데이터를 JSON 파일로 내보내기',
         '`/관리자 초기화 종류:전투 확인:확인` — 이 서버 데이터 삭제 (되돌릴 수 없음)',

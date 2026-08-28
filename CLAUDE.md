@@ -25,10 +25,6 @@ npm start        # deploy 후 bot 실행 (둘 다)
 - `GOOGLE_API_KEY` — `/요약`(구글 AI 상황 요약)에서 사용. 없으면 `GEMINI_API_KEY`도 본다.
   이 키만 넣으면 `/요약`이 동작한다 (https://aistudio.google.com/apikey 에서 발급).
 - `GEMINI_MODEL` — 요약에 쓸 모델 (선택, 기본 `gemini-2.5-flash`).
-- `ADMIN_USERNAME` — 관리자 모드를 쓸 수 있는 이름. 미설정 시 `darkandbluefox`.
-  유저명(핸들)·표시 이름(`globalName`)·서버 별명(`nickname`) 중 하나만 일치해도 통과한다.
-- `ADMIN_USER_ID` — 관리자 유저 ID 추가분 (선택, 쉼표로 여러 개). 코드에 박힌
-  `DEFAULT_ADMIN_IDS`(`1478976871617134773`)에 더해진다. ID는 이름이 바뀌어도 통과한다.
 
 ## 구조
 
@@ -61,8 +57,7 @@ npm start        # deploy 후 bot 실행 (둘 다)
 ## 데이터 / 영속성
 
 - 저장소는 `DATA_DIR` 아래 JSON 파일들: `characters.json`, `inventory.json`,
-  `missions.json`, `npcs.json`, `combat.json`, `scenes.json`, `declarations.json`,
-  `admin.json`(관리자 모드 ON/OFF 상태).
+  `missions.json`, `npcs.json`, `combat.json`, `scenes.json`, `declarations.json`.
 - 접근은 `loadJSON(fp)` / `saveJSON(fp, data)`로만. 손상된 JSON은 `{}`로 폴백.
 - **모든 데이터는 길드 단위로 스코프된다.** 항상 `interaction.guild.id`로 분기할 것.
   - 캐릭터: `allChars[guildId][uid] = { active, profiles: { "1": charObj, ... } }`
@@ -76,12 +71,7 @@ npm start        # deploy 후 bot 실행 (둘 다)
 
 - GM 전용 기능은 `isGM(member)` (디스코드 역할 이름이 `GM`)로 가드한다.
   실패 시 `{ content: '❌ GM 역할이 필요합니다.', ephemeral: true }` 반환.
-- **관리자 모드** (`/관리자`, 길드별 ON/OFF) — `isAdminUser(user)`로 지정 계정만 통과.
-  모드가 켜져 있으면 `isGM`이 무조건 true를 반환하고, 인터랙션 핸들러 진입부의
-  `forceEphemeral(interaction)`가 `reply`/`followUp`/`deferReply`를 감싸 그 계정의
-  모든 응답을 ephemeral로 강제한다. 단 `channel.send`로 나가는 공지(전투 턴/대시보드/
-  씬 트리거)는 성격상 공개 그대로다. 관련 헬퍼: `adminModeOn`, `setAdminMode`,
-  `adminActive`, `ADMIN_DATA_FILES`.
+  GM 역할을 우회하는 경로는 없다 (예전의 관리자 모드는 제거됨).
 - 기본 스탯 7종은 `DEFAULT_STATS`, 단 스탯 이름/개수와 HP 공식은 캐릭터·NPC마다 커스텀 가능.
 - 보정치 = 능력치/2 (`calcBonus`), 판정은 d20 + 보정. 숙련도 스택(`rollProficiency`)은
   능력치 20당 d20 +1개를 굴려 최댓값 채택. 무기는 폭발 주사위(`rollExploding`).
@@ -90,13 +80,7 @@ npm start        # deploy 후 bot 실행 (둘 다)
 ## 주사위 헬퍼
 
 - `rollDice(n, s)` — n개의 s면체. **모든 굴림의 단일 통로**이므로 새 굴림도 여기를 쓸 것.
-  `consumeForcedRoll(s)`이 관리자 주사위 고정을 여기서 가로챈다. 굴림 주체는 `rollCtx`
-  (`AsyncLocalStorage`)로 전달되며, 인터랙션 핸들러 진입부에서 `{guildId, userId}`를 심는다.
-  컨텍스트 밖(타이머 등)에서 굴리면 고정이 적용되지 않고 정상 무작위가 된다.
-- `rollOne(s)` — 주사위 1개를 `{ value, forced }`로 반환. `rollDice`와 `rollExploding`이 쓴다.
-  `rollExploding`은 `forced`인 굴림을 폭발시키지 않는다 (무제한 고정이면 끝없이 터지므로).
-- `/관리자 주사위고정 값:N` 기본값은 **대상 전체 · 횟수 무제한** — 해제 전까지 그 길드의
-  모든 굴림이 N이 된다. `횟수`/`대상` 옵션으로 좁힐 수 있다.
+  내부적으로 `rollOne(s)`(주사위 1개)만 호출한다. 굴림 결과를 조작하는 장치는 없다.
 - `evalRollExpression` — `2d6+5-1d4` 같은 식 파서(`/roll`).
 - `/pateroll` — 페이트 코어(Fudge) 주사위. 각 주사위가 -1/0/+1 중 하나, n개(기본 4) 굴려 합산.
   `개수`(1~100)와 선택 `보정` 옵션을 받는다.

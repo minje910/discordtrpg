@@ -221,33 +221,6 @@ const commands = [
     .addStringOption(o => o.setName('초점').setDescription('특별히 집중할 부분 (예: 전투 상황만, NPC 대화 위주)'))
     .addBooleanOption(o => o.setName('나만보기').setDescription('요약을 나에게만 보이게 (기본: 채널에 공개)')),
 
-  // ─── 관리자 모드 (지정 계정 전용 · 모든 응답은 본인만 보임) ───
-  new SlashCommandBuilder().setName('관리자').setDescription('관리자 모드 (지정된 계정만 사용 가능)')
-    .addSubcommand(s => s.setName('켜기').setDescription('관리자 모드 ON — GM 권한 통과 + 내 응답 전부 나만 보기'))
-    .addSubcommand(s => s.setName('끄기').setDescription('관리자 모드 OFF'))
-    .addSubcommand(s => s.setName('상태').setDescription('관리자 모드 상태와 이 서버 데이터 요약을 봅니다'))
-    .addSubcommand(s => s.setName('주사위고정').setDescription('해제할 때까지 모든 주사위 굴림을 지정한 값으로 고정합니다')
-      .addIntegerOption(o => o.setName('값').setDescription('나올 값 (면수보다 크면 최대값으로 맞춰짐)').setRequired(true))
-      .addIntegerOption(o => o.setName('횟수').setDescription('주사위 N개만 고정 (기본 0 = 해제할 때까지 전부)'))
-      .addStringOption(o => o.setName('대상').setDescription('누구의 굴림에 적용할지 (기본: 전체)')
-        .addChoices({ name: '나만', value: '나만' }, { name: '전체', value: '전체' })))
-    .addSubcommand(s => s.setName('주사위해제').setDescription('주사위 고정을 해제합니다'))
-    .addSubcommand(s => s.setName('데이터').setDescription('저장된 원본 데이터를 조회합니다')
-      .addStringOption(o => o.setName('종류').setDescription('조회할 데이터').setRequired(true)
-        .addChoices(
-          { name: '캐릭터', value: '캐릭터' }, { name: '인벤토리', value: '인벤토리' }, { name: '미션', value: '미션' },
-          { name: 'NPC', value: 'NPC' }, { name: '전투', value: '전투' }, { name: '씬', value: '씬' },
-          { name: '행동선언', value: '행동선언' }))
-      .addUserOption(o => o.setName('유저').setDescription('캐릭터/인벤토리 조회 시 특정 유저만')))
-    .addSubcommand(s => s.setName('백업').setDescription('이 서버의 모든 데이터를 JSON 파일로 내보냅니다'))
-    .addSubcommand(s => s.setName('초기화').setDescription('이 서버의 데이터를 삭제합니다 (되돌릴 수 없음)')
-      .addStringOption(o => o.setName('종류').setDescription('삭제할 데이터').setRequired(true)
-        .addChoices(
-          { name: '캐릭터', value: '캐릭터' }, { name: '인벤토리', value: '인벤토리' }, { name: '미션', value: '미션' },
-          { name: 'NPC', value: 'NPC' }, { name: '전투', value: '전투' }, { name: '씬', value: '씬' },
-          { name: '행동선언', value: '행동선언' }, { name: '전체', value: '전체' }))
-      .addStringOption(o => o.setName('확인').setDescription('정말 삭제하려면 "확인" 이라고 입력').setRequired(true))),
-
   new SlashCommandBuilder().setName('도움말').setDescription('봇의 모든 명령어 목록을 봅니다'),
 ].map(c => c.toJSON());
 

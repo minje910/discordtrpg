@@ -7,31 +7,15 @@
 const {
   Client, GatewayIntentBits, EmbedBuilder, Events,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
-  ButtonBuilder, ButtonStyle, AttachmentBuilder, PermissionFlagsBits,
+  ButtonBuilder, ButtonStyle, PermissionFlagsBits,
 } = require('discord.js');
 const fs   = require('fs');
 const path = require('path');
-const { AsyncLocalStorage } = require('node:async_hooks');
-
-// 지금 굴리는 주체가 누구인지(길드·유저) rollDice가 알 수 있게 해주는 컨텍스트.
-// await를 넘어가도 유지되고 길드끼리 섞이지 않는다 — 주사위 고정 판단에 쓴다.
-const rollCtx = new AsyncLocalStorage();
 
 // ───────────────────────────────────────────
 //  상수 & 파일 경로
 // ───────────────────────────────────────────
 const GM_ROLE         = 'GM';
-// 관리자(봇 소유자) 모드 — 지정된 단 하나의 계정만 사용 가능.
-// 기본은 디스코드 유저명(핸들) 'darkandbluefox'. 유저명이 바뀔 수 있으므로
-// ADMIN_USER_ID env로 유저 ID를 박아두면 그쪽도 함께 허용된다.
-const ADMIN_USERNAME  = (process.env.ADMIN_USERNAME || 'darkandbluefox').toLowerCase();
-// 기본으로 인정하는 관리자 유저 ID. 이름이 바뀌어도 ID는 안 바뀌므로 이쪽이 확실하다.
-// ADMIN_USER_ID env에 넣은 ID(쉼표로 여러 개 가능)는 여기에 더해진다.
-const DEFAULT_ADMIN_IDS = ['1478976871617134773'];
-const ADMIN_USER_IDS  = [...new Set([
-  ...DEFAULT_ADMIN_IDS,
-  ...(process.env.ADMIN_USER_ID || '').split(',').map(s => s.trim()).filter(Boolean),
-])];
 // DATA_DIR: Railway Volume 등 영속 저장소 경로를 env로 지정하면 그쪽에 저장됨.
 // (Railway: Volume 추가 후 Mount Path /data, env DATA_DIR=/data)
 const DATA_DIR        = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -42,7 +26,6 @@ const NPC_FILE        = path.join(DATA_DIR, 'npcs.json');
 const COMBAT_FILE     = path.join(DATA_DIR, 'combat.json');
 const SCENE_FILE      = path.join(DATA_DIR, 'scenes.json');
 const DECLARE_FILE    = path.join(DATA_DIR, 'declarations.json');
-const ADMIN_FILE      = path.join(DATA_DIR, 'admin.json');
 const DEFAULT_STATS   = ['체력', '근력', '민첩', '지능', '매력', '감각', '정신력'];
 const TURN_TIMEOUT_MS = 10 * 60 * 1000; // 10분 (Deadly Strike 규칙)
 
@@ -374,86 +357,7 @@ async function triggerSceneTraits(channel, guildId, newBackgrounds) {
 // ───────────────────────────────────────────
 //  유틸리티
 // ───────────────────────────────────────────
-// ───────────────────────────────────────────
-//  관리자 모드
-// ───────────────────────────────────────────
-// 저장 구조: admin[guildId] = { on, by, tag, since }
-// - 지정된 계정(ADMIN_USERNAME / ADMIN_USER_ID)만 켜고 끌 수 있다.
-// - 켜져 있는 동안 그 계정은 GM 역할 없이도 모든 GM 전용 기능을 통과하고,
-//   그 계정이 실행한 모든 응답은 본인에게만 보이도록(ephemeral) 강제된다.
-
-/**
- * 지정된 관리자 계정인지 판별.
- * 디스코드는 이름이 셋(유저명 핸들 / 표시 이름 / 서버 별명)이라 어느 쪽이든 인정한다.
- * 셋 다 "그 계정 본인"을 가리키므로, 역할처럼 남에게 넘겨줄 수 있는 값은 검사하지 않는다.
- * 등록된 관리자 유저 ID(ADMIN_USER_IDS)면 이름이 뭐로 바뀌든 통과한다 (가장 확실).
- */
-function isAdminUser(user, member) {
-  if (!user) return false;
-  if (ADMIN_USER_IDS.includes(user.id)) return true;
-  const names = [user.username, user.globalName, member?.nickname];
-  return names.some(n => (n ?? '').toLowerCase() === ADMIN_USERNAME);
-}
-
-/** 진단용 — 봇이 이 사람을 실제로 어떻게 보고 있는지 */
-function adminIdentityDebug(user, member) {
-  return [
-    `• 유저명(핸들): \`${user?.username ?? '?'}\``,
-    `• 표시 이름: \`${user?.globalName ?? '(없음)'}\``,
-    `• 서버 별명: \`${member?.nickname ?? '(없음)'}\``,
-    `• 유저 ID: \`${user?.id ?? '?'}\``,
-  ].join('\n');
-}
-
-/** 이 길드에서 관리자 모드가 켜져 있는가 */
-function adminModeState(guildId) { return loadJSON(ADMIN_FILE)[guildId] ?? null; }
-function adminModeOn(guildId)    { return adminModeState(guildId)?.on === true; }
-
-function setAdminMode(guildId, on, user) {
-  const all = loadJSON(ADMIN_FILE);
-  if (on) all[guildId] = { on: true, by: user.id, tag: user.username, since: new Date().toISOString() };
-  else    delete all[guildId];
-  saveJSON(ADMIN_FILE, all);
-}
-
-/** 관리자 권한이 실제로 발동 중인가 = 지정 계정 + 이 길드에서 모드 ON */
-function adminActive(member) {
-  if (!isAdminUser(member?.user, member)) return false;
-  const gid = member?.guild?.id;
-  return !!gid && adminModeOn(gid);
-}
-
-/**
- * 이 인터랙션의 모든 응답을 ephemeral(본인만 보기)로 강제한다.
- * reply / followUp / deferReply를 감싸므로 이후 커맨드 분기 코드는 그대로 두어도 된다.
- */
-function forceEphemeral(interaction) {
-  const hide = (opts) => {
-    const base = typeof opts === 'string' ? { content: opts } : { ...(opts ?? {}) };
-    base.ephemeral = true;
-    return base;
-  };
-  const origReply    = interaction.reply.bind(interaction);
-  const origFollowUp = interaction.followUp.bind(interaction);
-  const origDefer    = interaction.deferReply.bind(interaction);
-  interaction.reply      = (opts) => origReply(hide(opts));
-  interaction.followUp   = (opts) => origFollowUp(hide(opts));
-  interaction.deferReply = (opts) => origDefer(hide(opts));
-}
-
-// 관리자 모드에서 다룰 수 있는 길드 스코프 데이터 파일 목록
-const ADMIN_DATA_FILES = {
-  '캐릭터':   CHAR_FILE,
-  '인벤토리': INV_FILE,
-  '미션':     MISSION_FILE,
-  'NPC':      NPC_FILE,
-  '전투':     COMBAT_FILE,
-  '씬':       SCENE_FILE,
-  '행동선언': DECLARE_FILE,
-};
-
-// 관리자 모드가 켜져 있으면 GM 역할 없이도 GM 전용 기능을 통과한다.
-function isGM(member)     { return adminActive(member) || member.roles.cache.some(r => r.name === GM_ROLE); }
+function isGM(member)     { return member.roles.cache.some(r => r.name === GM_ROLE); }
 function effStat(char, s) {
   const base = char.stats?.[s] ?? char.specialStats?.[s] ?? 0;
   const temp = char.tempStats?.[s] ?? 0;
@@ -483,39 +387,13 @@ function hpFormulaLabel(formula) {
   return `${formula.stat} × ${formula.mult ?? 4}`;
 }
 function requiredExp(lv)   { return lv * 10; }
-/**
- * 주사위 고정 — 관리자 모드가 켜진 길드에서 지정된 값이 나오게 한다.
- * 주사위 1개당 1회 소모. remaining < 0 이면 해제할 때까지 무제한.
- * 고정값이 면수를 넘으면 그 주사위의 최대값으로 맞춘다 (예: 20 고정 + d6 → 6).
- * 반환 null이면 고정 없음 → 평소대로 무작위.
- */
-function consumeForcedRoll(sides) {
-  const ctx = rollCtx.getStore();
-  if (!ctx?.guildId) return null;
-
-  const all = loadJSON(ADMIN_FILE);
-  const st  = all[ctx.guildId];
-  const f   = st?.on ? st.forced : null;          // 모드를 끄면 고정도 자동 해제
-  if (!f) return null;
-  if (f.scope === '나만' && f.by !== ctx.userId) return null;
-
-  if (f.remaining >= 0) {
-    f.remaining--;
-    if (f.remaining <= 0) delete st.forced;
-    saveJSON(ADMIN_FILE, all);
-  }
-  return Math.min(Math.max(f.value, 1), sides);
-}
-
-/** 주사위 1개 — 고정값이 걸렸는지도 함께 알려준다 (폭발 주사위 판단용) */
+/** 주사위 1개 */
 function rollOne(sides) {
-  const forced = consumeForcedRoll(sides);
-  if (forced != null) return { value: forced, forced: true };
-  return { value: Math.floor(Math.random() * sides) + 1, forced: false };
+  return Math.floor(Math.random() * sides) + 1;
 }
 
 function rollDice(n, s) {
-  return Array.from({ length: n }, () => rollOne(s).value);
+  return Array.from({ length: n }, () => rollOne(s));
 }
 
 // 보정치: 능력치 / 2 (소수점 1자리까지 표현. 정수면 정수, .5면 .5)
@@ -542,10 +420,9 @@ function rollExploding(count, sides) {
   const all = [];
   let pending = count, safety = 100;
   while (pending > 0 && safety-- > 0) {
-    const results = Array.from({ length: pending }, () => rollOne(sides));
-    all.push(...results.map(r => r.value));
-    // 고정된 굴림은 폭발시키지 않는다. (예: 20 고정 + d6 → 매번 6이라 무한히 터진다)
-    pending = results.filter(r => !r.forced && r.value === sides).length;
+    const results = rollDice(pending, sides);
+    all.push(...results);
+    pending = results.filter(v => v === sides).length;
   }
   return all;
 }
@@ -804,23 +681,10 @@ function pendingKey(interaction) { return `${interaction.guild.id}:${interaction
 // ───────────────────────────────────────────
 //  인터랙션 핸들러
 // ───────────────────────────────────────────
-// 인터랙션마다 굴림 컨텍스트를 심고 실제 처리를 호출한다 (rollDice의 주사위 고정 판단용).
-client.on(Events.InteractionCreate, (interaction) => {
-  const ctx = { guildId: interaction.guild?.id ?? null, userId: interaction.user?.id ?? null };
-  return rollCtx.run(ctx, () => handleInteraction(interaction));
-});
+client.on(Events.InteractionCreate, (interaction) => handleInteraction(interaction));
 
 async function handleInteraction(interaction) {
  try {
-
-  // ══════════════════════════════
-  //  관리자 모드 — 출력 은닉
-  //  모드가 켜져 있는 동안, 지정 계정이 실행한 인터랙션의 모든 응답을
-  //  본인만 볼 수 있게(ephemeral) 강제한다. (버튼/모달 응답 포함)
-  // ══════════════════════════════
-  if (interaction.guild && isAdminUser(interaction.user, interaction.member) && adminModeOn(interaction.guild.id)) {
-    forceEphemeral(interaction);
-  }
 
   // ══════════════════════════════
   //  BUTTON 클릭 처리 — 모달 체이닝용
@@ -2396,196 +2260,6 @@ async function handleInteraction(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  // ── 관리자 모드 (지정 계정 전용) ──────────────────
-  if (cmd === '관리자') {
-    // 지정 계정이 아니면 여기서 차단. 응답은 언제나 실행한 본인에게만 보인다.
-    // 지정 계정이 아니면 차단. 왜 막혔는지 바로 알 수 있게 봇이 본 값을 함께 보여준다.
-    // (본인 정보만 본인에게 보여주므로 정보 노출 문제는 없다)
-    if (!isAdminUser(interaction.user, interaction.member)) {
-      const embed = new EmbedBuilder()
-        .setTitle('❌ 관리자 계정이 아닙니다').setColor(0xE74C3C)
-        .setDescription(`이 명령어는 지정된 관리자 계정만 사용할 수 있습니다.\n찾는 이름: \`${ADMIN_USERNAME}\`\n허용 ID: ${ADMIN_USER_IDS.map(id => `\`${id}\``).join(', ')}`)
-        .addFields({ name: '봇이 본 당신의 정보', value: adminIdentityDebug(interaction.user, interaction.member), inline: false })
-        .setFooter({ text: '본인이 맞는데 막혔다면, 위 유저 ID를 ADMIN_USER_ID 환경변수에 넣으면 확실히 통과합니다.' });
-      return interaction.reply({ embeds: [embed], ephemeral: true });
-    }
-    if (!interaction.guild)
-      return interaction.reply({ content: '❌ 관리자 모드는 서버 안에서만 사용할 수 있습니다. (데이터가 서버 단위로 저장됨)', ephemeral: true });
-
-    const guildId = interaction.guild.id;
-    const sub     = interaction.options.getSubcommand();
-
-    // ── 켜기 ──
-    if (sub === '켜기') {
-      if (adminModeOn(guildId))
-        return interaction.reply({ content: 'ℹ️ 이 서버에서 관리자 모드는 이미 켜져 있습니다.', ephemeral: true });
-      setAdminMode(guildId, true, interaction.user);
-      const embed = new EmbedBuilder()
-        .setTitle('🛡️ 관리자 모드 ON').setColor(0x2C3E50)
-        .setDescription(`**${interaction.user.username}** 전용 모드가 이 서버에서 활성화되었습니다.`)
-        .addFields(
-          { name: '권한',   value: 'GM 역할이 없어도 모든 🔒 GM 전용 명령을 그대로 사용할 수 있습니다.', inline: false },
-          { name: '은닉',   value: '이 계정이 실행한 **모든 명령의 응답**이 본인에게만 표시됩니다. 다른 사람에게는 아무것도 보이지 않습니다.', inline: false },
-          { name: '⚠️ 예외', value: '전투 턴 진행 공지·HP 대시보드·씬 특성 트리거처럼 봇이 채널에 **직접 전송**하는 메시지는 원래 모두에게 보여야 하는 공지라 그대로 공개됩니다.', inline: false },
-        )
-        .setFooter({ text: '해제: /관리자 끄기' });
-      return interaction.reply({ embeds: [embed], ephemeral: true });
-    }
-
-    // ── 끄기 ──
-    if (sub === '끄기') {
-      if (!adminModeOn(guildId))
-        return interaction.reply({ content: 'ℹ️ 이 서버에서 관리자 모드는 이미 꺼져 있습니다.', ephemeral: true });
-      setAdminMode(guildId, false, interaction.user);
-      return interaction.reply({ content: '🛡️ 관리자 모드를 **껐습니다**. 이제 일반 권한·일반 표시로 돌아갑니다.', ephemeral: true });
-    }
-
-    // ── 상태 ──
-    if (sub === '상태') {
-      const st        = adminModeState(guildId);
-      const charBook  = loadJSON(CHAR_FILE)[guildId] ?? {};
-      const profiles  = Object.values(charBook).reduce((n, b) => n + Object.keys(b?.profiles ?? {}).length, 0);
-      const actives   = Object.keys(activeCharsForGuild(loadJSON(CHAR_FILE), guildId)).length;
-      const npcs      = Object.keys(loadJSON(NPC_FILE)[guildId] ?? {}).length;
-      const missions  = Object.keys(loadJSON(MISSION_FILE)[guildId] ?? {}).length;
-      const invUsers  = Object.keys(loadJSON(INV_FILE)[guildId] ?? {}).length;
-      const decls     = Object.keys(loadJSON(DECLARE_FILE)[guildId] ?? {}).length;
-      const cs        = loadJSON(COMBAT_FILE)[guildId];
-      const scene     = loadJSON(SCENE_FILE)[guildId];
-
-      const embed = new EmbedBuilder()
-        .setTitle('🛡️ 관리자 모드 상태')
-        .setColor(st?.on ? 0x2ECC71 : 0x95A5A6)
-        .addFields(
-          { name: '모드',     value: st?.on ? `🟢 **ON**\n켠 시각: ${st.since}` : '⚪ OFF', inline: true },
-          { name: '통과 기준', value: `이름 \`${ADMIN_USERNAME}\` (유저명·표시이름·별명 중 하나)\n또는 유저 ID ${ADMIN_USER_IDS.map(id => `\`${id}\``).join(', ')}`, inline: false },
-          { name: '봇이 본 내 정보', value: adminIdentityDebug(interaction.user, interaction.member), inline: false },
-          { name: '서버',     value: `${interaction.guild.name}\n\`${guildId}\` · 멤버 ${interaction.guild.memberCount}명`, inline: false },
-          { name: '데이터',   value: [
-              `• 캐릭터: 유저 ${Object.keys(charBook).length}명 / 프로필 ${profiles}개 (활성 ${actives})`,
-              `• NPC: ${npcs}개 · 미션: ${missions}개 · 인벤 보유자: ${invUsers}명 · 행동선언: ${decls}건`,
-              `• 전투: ${cs?.active ? `진행 중 (라운드 ${cs.round}, 참가 ${cs.participants?.length ?? 0})` : '없음'}`,
-              `• 씬: ${scene?.backgrounds?.length ? scene.backgrounds.join(', ') : '미설정'}`,
-            ].join('\n'), inline: false },
-          { name: '주사위 고정', value: st?.forced
-              ? `🎯 **${st.forced.value}** 고정 중 · 남은 ${st.forced.remaining < 0 ? '무제한' : `${st.forced.remaining}개`} · 대상 ${st.forced.scope}`
-              : '없음 (정상 무작위)', inline: false },
-          { name: '저장 경로', value: `\`${DATA_DIR}\`${process.env.DATA_DIR ? '' : ' ⚠️ 휘발성 (DATA_DIR 미설정)'}`, inline: false },
-        );
-      return interaction.reply({ embeds: [embed], ephemeral: true });
-    }
-
-    // ── 주사위 고정 ──
-    if (sub === '주사위고정') {
-      if (!adminModeOn(guildId))
-        return interaction.reply({ content: '❌ 먼저 `/관리자 켜기`로 모드를 켜주세요. (모드를 끄면 주사위 고정도 함께 풀립니다)', ephemeral: true });
-
-      // 기본값 = 이 서버의 모든 굴림을 해제할 때까지 계속 고정.
-      // 특정 개수만 고정하고 싶으면 횟수, 내 굴림만 고정하려면 대상 옵션을 쓴다.
-      const value = interaction.options.getInteger('값');
-      const count = interaction.options.getInteger('횟수') ?? 0;
-      const scope = interaction.options.getString('대상') ?? '전체';
-      if (value < 1)   return interaction.reply({ content: '❌ 고정값은 1 이상이어야 합니다. (주사위 면수보다 크면 그 주사위의 최대값으로 맞춰집니다)', ephemeral: true });
-      if (count < 0 || count > 999) return interaction.reply({ content: '❌ 횟수는 0~999 사이여야 합니다. (0 = 해제할 때까지 무제한)', ephemeral: true });
-
-      const all = loadJSON(ADMIN_FILE);
-      all[guildId].forced = { value, remaining: count === 0 ? -1 : count, scope, by: interaction.user.id };
-      saveJSON(ADMIN_FILE, all);
-
-      const embed = new EmbedBuilder()
-        .setTitle('🎯 주사위 고정 ON').setColor(0xE67E22)
-        .addFields(
-          { name: '고정값', value: `**${value}**`, inline: true },
-          { name: '적용 범위', value: count === 0 ? '해제할 때까지 **모든 굴림**' : `주사위 **${count}개**만`, inline: true },
-          { name: '대상', value: scope === '전체' ? '이 서버의 **모든 사람**' : '**나만**', inline: true },
-          { name: '적용되는 곳', value: '판정·공격·데미지·숙련도 스택·이니셔티브·`/roll`·`/pateroll`·`/ai판정` — 주사위를 굴리는 모든 명령\n> 면수보다 큰 값은 최대값으로 맞춰집니다 (20 고정 + d6 → 6).\n> 고정된 굴림은 폭발 주사위로 다시 터지지 않습니다.', inline: false },
-          { name: '해제', value: '`/관리자 주사위해제` 또는 `/관리자 끄기`', inline: false },
-        );
-      return interaction.reply({ embeds: [embed], ephemeral: true });
-    }
-
-    // ── 주사위 고정 해제 ──
-    if (sub === '주사위해제') {
-      const all = loadJSON(ADMIN_FILE);
-      if (!all[guildId]?.forced)
-        return interaction.reply({ content: 'ℹ️ 설정된 주사위 고정이 없습니다.', ephemeral: true });
-      delete all[guildId].forced;
-      saveJSON(ADMIN_FILE, all);
-      return interaction.reply({ content: '🎲 주사위 고정을 해제했습니다. 이제 정상적으로 무작위로 굴러갑니다.', ephemeral: true });
-    }
-
-    // ── 데이터 조회 ──
-    if (sub === '데이터') {
-      const kind   = interaction.options.getString('종류');
-      const target = interaction.options.getUser('유저');
-      const fp     = ADMIN_DATA_FILES[kind];
-      if (!fp) return interaction.reply({ content: `❌ 알 수 없는 데이터 종류: \`${kind}\``, ephemeral: true });
-
-      let data  = loadJSON(fp)[guildId] ?? {};
-      let label = `${kind} · ${interaction.guild.name}`;
-      if (target) {
-        if (kind !== '캐릭터' && kind !== '인벤토리')
-          return interaction.reply({ content: 'ℹ️ `유저` 옵션은 **캐릭터 / 인벤토리** 조회에서만 사용할 수 있습니다.', ephemeral: true });
-        data = data[target.id];
-        if (data === undefined)
-          return interaction.reply({ content: `ℹ️ **${target.username}** 의 ${kind} 데이터가 없습니다.`, ephemeral: true });
-        label = `${kind} · ${target.username}`;
-      }
-
-      const json = JSON.stringify(data, null, 2);
-      if (json.length <= 1800)
-        return interaction.reply({ content: `🗃️ **${label}**\n\`\`\`json\n${json}\n\`\`\``, ephemeral: true });
-
-      const att = new AttachmentBuilder(Buffer.from(json, 'utf-8'), { name: `data-${guildId}.json` });
-      return interaction.reply({ content: `🗃️ **${label}** — 내용이 길어 파일로 첨부합니다. (${(json.length / 1024).toFixed(1)} KB)`, files: [att], ephemeral: true });
-    }
-
-    // ── 백업 ──
-    if (sub === '백업') {
-      const dump = {
-        guildId, guildName: interaction.guild.name,
-        exportedAt: new Date().toISOString(),
-        exportedBy: interaction.user.username,
-        data: {},
-      };
-      for (const [k, fp] of Object.entries(ADMIN_DATA_FILES)) dump.data[k] = loadJSON(fp)[guildId] ?? {};
-      const json = JSON.stringify(dump, null, 2);
-      const att  = new AttachmentBuilder(Buffer.from(json, 'utf-8'), { name: `backup-${guildId}.json` });
-      return interaction.reply({
-        content: `💾 **${interaction.guild.name}** 서버 데이터 백업 (${(json.length / 1024).toFixed(1)} KB)\n> ⚠️ \`무한\`(Infinity) 값은 JSON 특성상 \`null\`로 기록됩니다.`,
-        files: [att], ephemeral: true,
-      });
-    }
-
-    // ── 초기화 (파괴적) ──
-    if (sub === '초기화') {
-      const kind    = interaction.options.getString('종류');
-      const confirm = interaction.options.getString('확인');
-      if (confirm !== '확인')
-        return interaction.reply({ content: '❌ 취소되었습니다. 정말 삭제하려면 `확인` 옵션에 정확히 **확인** 이라고 입력해주세요. (먼저 `/관리자 백업` 권장)', ephemeral: true });
-
-      const targets = kind === '전체' ? Object.entries(ADMIN_DATA_FILES) : [[kind, ADMIN_DATA_FILES[kind]]];
-      if (!targets[0]?.[1])
-        return interaction.reply({ content: `❌ 알 수 없는 데이터 종류: \`${kind}\``, ephemeral: true });
-
-      const wiped = [];
-      for (const [k, fp] of targets) {
-        const all = loadJSON(fp);
-        if (all[guildId] === undefined) continue;
-        delete all[guildId];
-        saveJSON(fp, all);
-        wiped.push(k);
-      }
-      if (wiped.includes('전투')) clearTurnTimeout(guildId);
-
-      if (!wiped.length)
-        return interaction.reply({ content: `ℹ️ 이 서버에 삭제할 **${kind}** 데이터가 없었습니다.`, ephemeral: true });
-      return interaction.reply({ content: `🧹 이 서버의 데이터를 삭제했습니다: **${wiped.join(', ')}**\n> 다른 서버 데이터는 영향받지 않습니다.`, ephemeral: true });
-    }
-
-    return interaction.reply({ content: '❌ 알 수 없는 하위 명령입니다.', ephemeral: true });
-  }
-
   // ── 도움말 ───────────────────────────────────────
   if (cmd === '도움말') {
     const embed = new EmbedBuilder()
@@ -2613,19 +2287,6 @@ async function handleInteraction(interaction) {
         { name: '🛠️ GM 관리 🔒', value: ['`/gm캐릭터등록 유저:@철수` — 플레이어 캐릭터 대신 등록 (팝업)', '`/레벨업` `/gm수정` `/gm체력`', '`/gm임시스탯` `/gm스킬추가` `/gm스킬제거`', '`/gm특성추가` `/gm특성제거` `/gm특수스탯추가` `/gm특수스탯제거`', '`/gm설명등록`'].join('\n'), inline: false },
       )
       .setFooter({ text: '🔒 = GM 역할 필요' });
-
-    // 관리자 전용 안내는 지정 계정에게만 노출한다.
-    if (isAdminUser(interaction.user, interaction.member)) {
-      embed.addFields({ name: '🛡️ 관리자 모드 (내 계정 전용)', value: [
-        '`/관리자 켜기` `/관리자 끄기` — 모드 ON/OFF (GM 권한 통과 + 내 응답 전부 나만 보기)',
-        '`/관리자 상태` — 모드 상태 & 서버 데이터 요약',
-        '`/관리자 주사위고정 값:20` — 해제할 때까지 이 서버의 **모든 굴림**을 그 값으로 고정',
-        '> 옵션 `[횟수:N]` 주사위 N개만 · `[대상:나만]` 내 굴림만 / 해제: `/관리자 주사위해제`',
-        '`/관리자 데이터 종류:캐릭터 [유저:@철수]` — 원본 데이터 조회',
-        '`/관리자 백업` — 이 서버 데이터를 JSON 파일로 내보내기',
-        '`/관리자 초기화 종류:전투 확인:확인` — 이 서버 데이터 삭제 (되돌릴 수 없음)',
-      ].join('\n'), inline: false });
-    }
 
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }

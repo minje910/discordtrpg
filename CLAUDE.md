@@ -57,7 +57,8 @@ npm start        # deploy 후 bot 실행 (둘 다)
 ## 데이터 / 영속성
 
 - 저장소는 `DATA_DIR` 아래 JSON 파일들: `characters.json`, `inventory.json`,
-  `missions.json`, `npcs.json`, `combat.json`, `scenes.json`, `declarations.json`.
+  `missions.json`, `npcs.json`, `combat.json`, `scenes.json`, `declarations.json`,
+  `rankings.json`.
 - 접근은 `loadJSON(fp)` / `saveJSON(fp, data)`로만. 손상된 JSON은 `{}`로 폴백.
 - **모든 데이터는 길드 단위로 스코프된다.** 항상 `interaction.guild.id`로 분기할 것.
   - 캐릭터: `allChars[guildId][uid] = { active, profiles: { "1": charObj, ... } }`
@@ -84,3 +85,9 @@ npm start        # deploy 후 bot 실행 (둘 다)
 - `evalRollExpression` — `2d6+5-1d4` 같은 식 파서(`/roll`).
 - `/pateroll` — 페이트 코어(Fudge) 주사위. 각 주사위가 -1/0/+1 중 하나, n개(기본 4) 굴려 합산.
   `개수`(1~100)와 선택 `보정` 옵션을 받는다.
+- `/랭킹` — 전용 `rankings.json`만 사용하는 독립 시스템. 길드 안에서도 **채널별로**
+  최고·최저 기록과 유저별·채널별 누적 굴림 횟수를 따로 저장하고, 같은 길드의 모든 채널
+  기록을 합산한 **서버 전체 랭킹**도 함께 표시한다. 저장·조회 키는 항상 길드 ID 아래여서
+  다른 서버의 기록은 합산하거나 볼 수 없다. `굴림`은 나온 값 ÷ 가능한 최댓값으로 행운도를
+  계산한다. 비율 비교는 교차 곱으로 처리하므로 `1d10`의 1과 `1d100`의 10은 정확히
+  동률이다. 기존 `/roll`·판정·전투 결과나 저장 데이터에는 절대 관여하지 않는다.

@@ -7,6 +7,11 @@ const commands = [
   new SlashCommandBuilder().setName('pateroll').setDescription('페이트 코어 주사위(±1·0)를 굴립니다 (n개 합산)')
     .addIntegerOption(o => o.setName('개수').setDescription('굴릴 주사위 개수 (기본 4)'))
     .addIntegerOption(o => o.setName('보정').setDescription('합계에 더할 보정치 (선택)')),
+  new SlashCommandBuilder().setName('랭킹').setDescription('채널별·서버 전체 비율 기반 행운 랭킹을 확인합니다')
+    .addSubcommand(s => s.setName('굴림').setDescription('현재 채널과 서버 전체 랭킹에 기록합니다')
+      .addStringOption(o => o.setName('주사위').setDescription('예) 1d10, 1d100, 2d6').setRequired(true)))
+    .addSubcommand(s => s.setName('보기').setDescription('현재 채널과 서버 전체의 높은·낮은 값 랭킹을 봅니다'))
+    .addSubcommand(s => s.setName('초기화').setDescription('현재 채널의 행운 랭킹을 초기화합니다 (GM 전용)')),
 
   // ─── 상태창 ───
   new SlashCommandBuilder().setName('상태등록').setDescription('새 캐릭터 프로필을 등록합니다 (여러 개 가능)')

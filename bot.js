@@ -26,8 +26,11 @@ const NPC_FILE        = path.join(DATA_DIR, 'npcs.json');
 const COMBAT_FILE     = path.join(DATA_DIR, 'combat.json');
 const SCENE_FILE      = path.join(DATA_DIR, 'scenes.json');
 const DECLARE_FILE    = path.join(DATA_DIR, 'declarations.json');
+// 랭킹은 다른 기능의 상태와 섞이지 않도록 전용 파일에만 저장한다.
+const RANK_FILE       = path.join(DATA_DIR, 'rankings.json');
 const DEFAULT_STATS   = ['체력', '근력', '민첩', '지능', '매력', '감각', '정신력'];
 const TURN_TIMEOUT_MS = 10 * 60 * 1000; // 10분 (Deadly Strike 규칙)
+const RANKING_DISPLAY_LIMIT = 10;
 
 // ── Google AI (Gemini) — /요약 에서 채널 로그를 읽고 상황을 정리한다 ──
 // 키 하나만 넣으면 끝: GOOGLE_API_KEY (없으면 GEMINI_API_KEY도 본다).
@@ -466,6 +469,123 @@ function evalRollExpression(expr) {
     return `${op}${p.label}${p.detail ? p.detail : ''}`;
   }).join('');
   return { total, display };
+}
+
+// ── 랭킹 전용 주사위 / 행운도 헬퍼 ─────────────────────────
+// 기존 /roll, 전투, 판정의 해석·결과에는 관여하지 않는다.
+// 행운도는 보정 없는 나온 값 ÷ 가능한 최댓값으로만 비교한다.
+function parseRankingDice(raw) {
+  const match = (raw ?? '').trim().match(/^(\d+)[dD](\d+)$/);
+  if (!match) throw new Error('주사위는 `1d10`, `2d6` 형식으로 입력해주세요.');
+
+  const count = Number(match[1]);
+  const sides = Number(match[2]);
+  if (count < 1 || count > 100) throw new Error('주사위 개수는 1~100 사이여야 합니다.');
+  if (sides < 2 || sides > 1000) throw new Error('면체 수는 2~1000 사이여야 합니다.');
+  return { count, sides, notation: `${count}d${sides}` };
+}
+
+function rankLuckCompare(a, b) {
+  // 부동소수점 오차 없이 비율을 비교한다. 예: 1/10 = 10/100.
+  return a.total * b.maximum - b.total * a.maximum;
+}
+
+function rankLuckPercent(entry) {
+  return (entry.total / entry.maximum * 100).toFixed(2);
+}
+
+function rankEntryLine(entry, rank) {
+  const diceResult = entry.rolls?.length > 1
+    ? `[${entry.rolls.join(' + ')}] = ${entry.total}`
+    : `${entry.total}`;
+  return `**${rank}위** ${entry.name} — \`${entry.dice}\` → ${diceResult}/${entry.maximum} (**${rankLuckPercent(entry)}%**) · 누적 ${entry.rollCount ?? 0}회`;
+}
+
+function formatLuckRanking(entries, direction) {
+  if (!entries.length) return '아직 기록이 없습니다. `/랭킹 굴림`으로 참가하세요.';
+
+  const sorted = [...entries].sort((a, b) => {
+    const compared = rankLuckCompare(a, b);
+    if (compared !== 0) return direction === 'high' ? -compared : compared;
+    return (a.rolledAt ?? '').localeCompare(b.rolledAt ?? '');
+  }).slice(0, RANKING_DISPLAY_LIMIT);
+
+  let previous = null;
+  let rank = 0;
+  return sorted.map((entry, index) => {
+    if (!previous || rankLuckCompare(entry, previous) !== 0) rank = index + 1;
+    previous = entry;
+    return rankEntryLine(entry, rank);
+  }).join('\n');
+}
+
+// rankings.json: { guildId: { channels: { channelId: { rollCount, users } } } }
+// 서버 전체 랭킹은 이 길드의 채널 기록만 합산해서 계산하므로 서버 간 데이터가 섞이지 않는다.
+// 예전 길드 단위 랭킹이 있다면 legacy에 보존하고, 새 채널 기록과 섞지 않는다.
+function writableRankingChannel(allRankings, guildId, channelId) {
+  const guildRankings = allRankings[guildId];
+  if (!guildRankings) {
+    allRankings[guildId] = { channels: {} };
+  } else if (!guildRankings.channels) {
+    allRankings[guildId] = { channels: {}, legacy: guildRankings };
+  }
+
+  const channels = allRankings[guildId].channels;
+  if (!channels[channelId]) channels[channelId] = { rollCount: 0, users: {} };
+  return channels[channelId];
+}
+
+function readRankingChannel(allRankings, guildId, channelId) {
+  return allRankings?.[guildId]?.channels?.[channelId] ?? { rollCount: 0, users: {} };
+}
+
+function updateRankingScope(ranking, uid, entry) {
+  const current = ranking.users[uid] ?? {};
+  const highUpdated = !current.high || rankLuckCompare(entry, current.high) > 0;
+  const lowUpdated  = !current.low  || rankLuckCompare(entry, current.low)  < 0;
+  const userRollCount = (current.rollCount ?? 0) + 1;
+  ranking.users[uid] = {
+    high: highUpdated ? entry : current.high,
+    low:  lowUpdated  ? entry : current.low,
+    rollCount: userRollCount,
+  };
+  ranking.rollCount = (ranking.rollCount ?? 0) + 1;
+  return { highUpdated, lowUpdated, userRollCount };
+}
+
+function rankingRecordLists(ranking) {
+  const records = Object.values(ranking?.users ?? {});
+  return {
+    high: records.map(record => record?.high && { ...record.high, rollCount: record.rollCount ?? 0 }).filter(Boolean),
+    low:  records.map(record => record?.low  && { ...record.low,  rollCount: record.rollCount ?? 0 }).filter(Boolean),
+  };
+}
+
+function combinedServerRanking(allRankings, guildId) {
+  const guildRankings = allRankings?.[guildId];
+  const combined = { rollCount: 0, users: {} };
+  if (!guildRankings) return combined;
+
+  // legacy는 채널별 저장 전의 길드 전체 기록이다. 데이터는 보존하되 현재 서버 합계에 포함한다.
+  const scopes = guildRankings.channels
+    ? [...Object.values(guildRankings.channels), ...(guildRankings.legacy ? [guildRankings.legacy] : [])]
+    : [guildRankings];
+
+  for (const scope of scopes) {
+    if (!scope || typeof scope !== 'object') continue;
+    const users = scope.users ?? scope;
+    combined.rollCount += Number.isFinite(scope.rollCount) ? scope.rollCount : 0;
+
+    for (const [scopeUid, record] of Object.entries(users)) {
+      if (!record?.high && !record?.low) continue;
+      const merged = combined.users[scopeUid] ?? { rollCount: 0 };
+      if (record.high && (!merged.high || rankLuckCompare(record.high, merged.high) > 0)) merged.high = record.high;
+      if (record.low  && (!merged.low  || rankLuckCompare(record.low,  merged.low)  < 0)) merged.low  = record.low;
+      merged.rollCount += Number.isFinite(record.rollCount) ? record.rollCount : 0;
+      combined.users[scopeUid] = merged;
+    }
+  }
+  return combined;
 }
 
 function makeHPBar(cur, max) {
@@ -941,6 +1061,7 @@ async function handleInteraction(interaction) {
   // ══════════════════════════════
   if (!interaction.isChatInputCommand()) return;
   const { commandName: cmd, member } = interaction;
+  const uid = interaction.user.id;
 
   // ── 주사위 (식 표현식 지원: 1d20 + 1d10 + 5) ───────
   if (cmd === 'roll') {
@@ -983,6 +1104,84 @@ async function handleInteraction(interaction) {
           { name: '합계',   value: `**${total >= 0 ? '+' : ''}${total}**`, inline: true },
         ).setFooter({ text: `${member.displayName}의 굴림 (${n}dF)` })
     ]});
+  }
+
+  // ── 행운 랭킹 (기존 주사위·전투 시스템과 완전 분리) ───────
+  if (cmd === '랭킹') {
+    const subcommand = interaction.options.getSubcommand();
+
+    if (subcommand === '굴림') {
+      const diceRaw = interaction.options.getString('주사위');
+      let dice;
+      try { dice = parseRankingDice(diceRaw); }
+      catch (e) { return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true }); }
+
+      // 문서의 주사위 단일 통로를 그대로 사용하되, 결과는 랭킹 파일에만 기록한다.
+      const rolls = rollDice(dice.count, dice.sides);
+      const total = rolls.reduce((sum, value) => sum + value, 0);
+      const entry = {
+        userId: uid,
+        name: member.displayName,
+        dice: dice.notation,
+        rolls,
+        total,
+        maximum: dice.count * dice.sides,
+        rolledAt: new Date().toISOString(),
+      };
+
+      const allRankings = loadJSON(RANK_FILE);
+      const channelRankings = writableRankingChannel(allRankings, interaction.guild.id, interaction.channelId);
+      const previousServerUser = combinedServerRanking(allRankings, interaction.guild.id).users[uid];
+      const channelUpdate = updateRankingScope(channelRankings, uid, entry);
+      const serverRankings = combinedServerRanking(allRankings, interaction.guild.id);
+      const serverUser = serverRankings.users[uid];
+      const serverUpdate = {
+        highUpdated: !previousServerUser?.high || rankLuckCompare(serverUser.high, previousServerUser.high) > 0,
+        lowUpdated:  !previousServerUser?.low  || rankLuckCompare(serverUser.low,  previousServerUser.low)  < 0,
+      };
+      saveJSON(RANK_FILE, allRankings);
+
+      const updateText = update => [
+        update.highUpdated ? '높은 값 랭킹 갱신' : null,
+        update.lowUpdated ? '낮은 값 랭킹 갱신' : null,
+      ].filter(Boolean).join(' · ') || '기존 최고/최저 기록 유지';
+      const diceResult = rolls.length > 1 ? `[${rolls.join(' + ')}] = ${total}` : `${total}`;
+      return interaction.reply({ embeds: [
+        new EmbedBuilder().setTitle('🏆 랭킹 주사위 결과').setColor(0xF1C40F)
+          .addFields(
+            { name: '굴림', value: `\`${dice.notation}\` → ${diceResult}/${entry.maximum}`, inline: false },
+            { name: '행운도', value: `**${rankLuckPercent(entry)}%** (나온 값 ÷ 가능한 최댓값)`, inline: true },
+            { name: '채널 기록', value: `${updateText(channelUpdate)} · 내 누적 ${channelUpdate.userRollCount}회`, inline: false },
+            { name: '서버 전체 기록', value: `${updateText(serverUpdate)} · 내 누적 ${serverUser.rollCount}회`, inline: false },
+          ).setFooter({ text: `이 채널 누적 ${channelRankings.rollCount}회 · 이 서버 전체 누적 ${serverRankings.rollCount}회 · 1d10의 1 = 1d100의 10 (10.00%)` })
+      ]});
+    }
+
+    if (subcommand === '보기') {
+      const allRankings = loadJSON(RANK_FILE);
+      const channelRankings = readRankingChannel(allRankings, interaction.guild.id, interaction.channelId);
+      const serverRankings = combinedServerRanking(allRankings, interaction.guild.id);
+      const channelRecords = rankingRecordLists(channelRankings);
+      const serverRecords  = rankingRecordLists(serverRankings);
+      return interaction.reply({ embeds: [
+        new EmbedBuilder().setTitle(`🏆 #${interaction.channel?.name ?? '현재 채널'} · 서버 전체 행운 랭킹`).setColor(0xF1C40F)
+          .setDescription('행운도 = **나온 값 ÷ 가능한 최댓값** · 서버 전체는 이 서버의 채널 기록만 합산하며 다른 서버에서는 조회할 수 없습니다.')
+          .addFields(
+            { name: '🌟 이 채널 높은 값 랭킹', value: formatLuckRanking(channelRecords.high, 'high'), inline: false },
+            { name: '💀 이 채널 낮은 값 랭킹', value: formatLuckRanking(channelRecords.low, 'low'), inline: false },
+            { name: '👑 서버 전체 높은 값 랭킹', value: formatLuckRanking(serverRecords.high, 'high'), inline: false },
+            { name: '☠️ 서버 전체 낮은 값 랭킹', value: formatLuckRanking(serverRecords.low, 'low'), inline: false },
+          )
+          .setFooter({ text: `이 채널 누적 ${channelRankings.rollCount ?? 0}회 · 이 서버 전체 누적 ${serverRankings.rollCount}회 · 각 유저의 최고·최저 기록 · 상위 ${RANKING_DISPLAY_LIMIT}명` })
+      ]});
+    }
+
+    // 초기화는 현재 채널의 별도 랭킹만 지우므로 다른 채널·기존 기능에는 영향이 없다.
+    if (!isGM(member)) return interaction.reply({ content: '❌ GM 역할이 필요합니다.', ephemeral: true });
+    const allRankings = loadJSON(RANK_FILE);
+    if (allRankings?.[interaction.guild.id]?.channels) delete allRankings[interaction.guild.id].channels[interaction.channelId];
+    saveJSON(RANK_FILE, allRankings);
+    return interaction.reply({ content: '✅ 이 채널의 높은 값·낮은 값 랭킹과 누적 횟수를 초기화했습니다. 다른 채널 기록은 유지됩니다.' });
   }
 
   // ── 상태등록 (Modal) ──────────────────────────────
@@ -2265,7 +2464,7 @@ async function handleInteraction(interaction) {
     const embed = new EmbedBuilder()
       .setTitle('📖 TRPG 봇 명령어 목록').setColor(0x3498DB)
       .addFields(
-        { name: '🎲 주사위',    value: ['`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-)', '`/pateroll 개수:4 [보정:0]` — 페이트 코어 주사위(±1·0) n개 합산'].join('\n'), inline: false },
+        { name: '🎲 주사위',    value: ['`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-)', '`/pateroll 개수:4 [보정:0]` — 페이트 코어 주사위(±1·0) n개 합산', '`/랭킹 굴림 주사위:1d100` — 채널별 기록과 서버 전체 합계를 동시에 누적 · `/랭킹 보기` — 현재 채널과 같은 서버 전체의 높은/낮은 값 랭킹'].join('\n'), inline: false },
         { name: '📊 캐릭터 (다중 프로필 지원)',    value: ['`/상태등록 [스탯:체력,근력,민첩,...] [체력계산:체력*4] [사진:첨부]` — 새 캐릭터. 스탯 이름·개수·HP 공식은 캐릭터마다 자유 지정', '`/프로필목록` `/프로필선택 id:N` `/프로필삭제 id:N`', '`/프로필사진 사진:첨부` — 활성 프로필 사진 설정 / `/프로필사진제거`', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
         { name: '⚔️ 스킬·특성·특수스탯', value: ['`/스킬추가` `/스킬제거` `/특성추가` `/특성제거`', '`/특수스탯추가` `/특수스탯제거`'].join('\n'), inline: false },
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },

@@ -7,7 +7,7 @@ const commands = [
   new SlashCommandBuilder().setName('pateroll').setDescription('페이트 코어 주사위(±1·0)를 굴립니다 (n개 합산)')
     .addIntegerOption(o => o.setName('개수').setDescription('굴릴 주사위 개수 (기본 4)'))
     .addIntegerOption(o => o.setName('보정').setDescription('합계에 더할 보정치 (선택)')),
-  new SlashCommandBuilder().setName('랭킹').setDescription('/roll 결과의 누적 합계로 매기는 채널별·서버 전체 랭킹')
+  new SlashCommandBuilder().setName('랭킹').setDescription('/roll 주사위 눈의 행운 지수로 매기는 채널별·서버 전체 랭킹')
     .addSubcommand(s => s.setName('보기').setDescription('/roll 결과로 쌓인 현재 채널·서버 전체 랭킹을 봅니다'))
     .addSubcommand(s => s.setName('초기화').setDescription('현재 채널의 행운 랭킹을 초기화합니다 (GM 전용)')),
 

@@ -473,91 +473,52 @@ function evalRollExpression(expr) {
 
 // ── 랭킹 전용 주사위 / 결과 헬퍼 ───────────────────────────
 // 기존 /roll, 전투, 판정의 해석·결과에는 관여하지 않는다.
-// 순위는 나온 합계를 먼저, 동점이면 주사위의 가능한 최댓값을 함께 비교한다.
+// 순위는 유저별 누적 합계(모든 /roll 결과의 합)로 매긴다.
 // /roll과 같은 식 문법을 읽되, 다시 굴리지는 않고 이미 나온 결과만 랭킹에 기록한다.
 function rankingEntryFromRollExpression(expr, result, interaction) {
   const clean = (expr ?? '').replace(/\s+/g, '');
-  const norm = clean.startsWith('+') || clean.startsWith('-') ? clean : '+' + clean;
-  const tokenRe = /([+-])(\d+[dD]\d+|\d+)/g;
-  let maximum = 0;
-  let hasDice = false;
-  let lastIdx = 0;
-  let match;
-
-  while ((match = tokenRe.exec(norm)) !== null) {
-    if (match.index !== lastIdx) throw new Error('랭킹용 주사위 식 해석 실패');
-    lastIdx = match.index + match[0].length;
-    const sign = match[1] === '-' ? -1 : 1;
-    const body = match[2];
-    const dice = body.match(/^(\d+)[dD](\d+)$/);
-    if (!dice) {
-      maximum += sign * Number(body);
-      continue;
-    }
-
-    const count = Number(dice[1]);
-    const sides = Number(dice[2]);
-    if (count < 1 || count > 100 || sides < 2 || sides > 1000)
-      throw new Error('랭킹용 주사위 범위 오류');
-    // 뺄셈 주사위는 최소값이 나와야 전체 식의 최댓값이 된다.
-    maximum += sign === 1 ? count * sides : -count;
-    hasDice = true;
-  }
-  if (lastIdx !== norm.length) throw new Error('랭킹용 주사위 식 해석 실패');
+  const hasDice = /\d+[dD]\d+/.test(clean);
   if (!hasDice) return null; // 정수만 입력한 /roll은 랭킹에 기록하지 않는다.
 
   return {
-    userId: interaction.user.id,
     name: interaction.member?.displayName ?? interaction.user.username,
-    dice: clean,
-    detail: result.display,
     total: result.total,
-    maximum,
     rolledAt: new Date().toISOString(),
   };
 }
 
-function rankOutcomeCompare(a, b, direction) {
-  // 1d2에서 2가 나왔다고 비율 100%만으로 자동 1위가 되지 않게 실제 결과를 우선한다.
-  // 같은 결과라면 최대치가 큰 주사위의 결과를 우선한다.
-  const totalDiff = a.total - b.total;
-  if (totalDiff !== 0) return direction === 'high' ? totalDiff : -totalDiff;
-  return a.maximum - b.maximum;
+// 순위는 유저별 누적 합계(모든 /roll 결과의 합)가 큰 순서. 합계가 같으면 굴림 횟수가 적은 쪽(평균이 높은 쪽) 우선.
+function rankRecordCompare(a, b) {
+  const sumDiff = (b.sum ?? 0) - (a.sum ?? 0);
+  if (sumDiff !== 0) return sumDiff;
+  return (a.rollCount ?? 0) - (b.rollCount ?? 0);
 }
 
-function rankLuckPercent(entry) {
-  if (!Number.isFinite(entry.maximum) || entry.maximum <= 0) return '—';
-  return (entry.total / entry.maximum * 100).toFixed(2);
+// 한 줄에 순위·이름·누적 합계·횟수만 보여준다. 개별 굴림 내용은 표시하지 않는다.
+function rankEntryLine(record, rank) {
+  const medal = ['🥇', '🥈', '🥉'][rank - 1] ?? `**${rank}위**`;
+  return `${medal} ${record.name} — **${record.sum}** (${record.rollCount}회)`;
 }
 
-function rankEntryLine(entry, rank) {
-  const diceResult = entry.detail ?? (entry.rolls?.length > 1
-    ? `[${entry.rolls.join(' + ')}] = ${entry.total}`
-    : `${entry.total}`);
-  const percentage = rankLuckPercent(entry);
-  const ratioLabel = percentage === '—' ? '비율 계산 불가' : `비율 **${percentage}%**`;
-  return `**${rank}위** ${entry.name} — \`${entry.dice}\` → ${diceResult} / 최대 ${entry.maximum} (${ratioLabel}) · 누적 ${entry.rollCount ?? 0}회`;
-}
+function formatLuckRanking(records) {
+  if (!records.length) return '아직 기록이 없습니다.\n`/roll`로 주사위를 굴려 참가하세요.';
 
-function formatLuckRanking(entries, direction) {
-  if (!entries.length) return '아직 기록이 없습니다. `/roll`로 주사위를 굴려 참가하세요.';
-
-  const sorted = [...entries].sort((a, b) => {
-    const compared = rankOutcomeCompare(a, b, direction);
-    if (compared !== 0) return -compared;
-    return (a.rolledAt ?? '').localeCompare(b.rolledAt ?? '');
+  const sorted = [...records].sort((a, b) => {
+    const compared = rankRecordCompare(a, b);
+    if (compared !== 0) return compared;
+    return (a.lastRolledAt ?? '').localeCompare(b.lastRolledAt ?? '');
   }).slice(0, RANKING_DISPLAY_LIMIT);
 
   let previous = null;
   let rank = 0;
-  return sorted.map((entry, index) => {
-    if (!previous || rankOutcomeCompare(entry, previous, direction) !== 0) rank = index + 1;
-    previous = entry;
-    return rankEntryLine(entry, rank);
+  return sorted.map((record, index) => {
+    if (!previous || rankRecordCompare(record, previous) !== 0) rank = index + 1;
+    previous = record;
+    return rankEntryLine(record, rank);
   }).join('\n');
 }
 
-// rankings.json: { guildId: { channels: { channelId: { rollCount, users } } } }
+// rankings.json: { guildId: { channels: { channelId: { rollCount, users: { uid: { name, sum, rollCount, lastRolledAt } } } } } }
 // 서버 전체 랭킹은 이 길드의 채널 기록만 합산해서 계산하므로 서버 간 데이터가 섞이지 않는다.
 // 예전 길드 단위 랭킹이 있다면 legacy에 보존하고, 새 채널 기록과 섞지 않는다.
 function writableRankingChannel(allRankings, guildId, channelId) {
@@ -577,26 +538,21 @@ function readRankingChannel(allRankings, guildId, channelId) {
   return allRankings?.[guildId]?.channels?.[channelId] ?? { rollCount: 0, users: {} };
 }
 
+// 누적 합계 기록이 없는 옛 최고·최저 방식 레코드는 합계를 복원할 수 없으므로 새로 시작한다.
 function updateRankingScope(ranking, uid, entry) {
-  const current = ranking.users[uid] ?? {};
-  const highUpdated = !current.high || rankOutcomeCompare(entry, current.high, 'high') > 0;
-  const lowUpdated  = !current.low  || rankOutcomeCompare(entry, current.low,  'low')  > 0;
-  const userRollCount = (current.rollCount ?? 0) + 1;
+  const current = ranking.users[uid];
+  const carried = Number.isFinite(current?.sum) ? current : { sum: 0, rollCount: 0 };
   ranking.users[uid] = {
-    high: highUpdated ? entry : current.high,
-    low:  lowUpdated  ? entry : current.low,
-    rollCount: userRollCount,
+    name: entry.name,
+    sum: carried.sum + entry.total,
+    rollCount: carried.rollCount + 1,
+    lastRolledAt: entry.rolledAt,
   };
   ranking.rollCount = (ranking.rollCount ?? 0) + 1;
-  return { highUpdated, lowUpdated, userRollCount };
 }
 
-function rankingRecordLists(ranking) {
-  const records = Object.values(ranking?.users ?? {});
-  return {
-    high: records.map(record => record?.high && { ...record.high, rollCount: record.rollCount ?? 0 }).filter(Boolean),
-    low:  records.map(record => record?.low  && { ...record.low,  rollCount: record.rollCount ?? 0 }).filter(Boolean),
-  };
+function rankingRecordList(ranking) {
+  return Object.values(ranking?.users ?? {}).filter(record => Number.isFinite(record?.sum));
 }
 
 function combinedServerRanking(allRankings, guildId) {
@@ -615,11 +571,15 @@ function combinedServerRanking(allRankings, guildId) {
     combined.rollCount += Number.isFinite(scope.rollCount) ? scope.rollCount : 0;
 
     for (const [scopeUid, record] of Object.entries(users)) {
-      if (!record?.high && !record?.low) continue;
-      const merged = combined.users[scopeUid] ?? { rollCount: 0 };
-      if (record.high && (!merged.high || rankOutcomeCompare(record.high, merged.high, 'high') > 0)) merged.high = record.high;
-      if (record.low  && (!merged.low  || rankOutcomeCompare(record.low,  merged.low,  'low')  > 0)) merged.low  = record.low;
+      if (!Number.isFinite(record?.sum)) continue;
+      const merged = combined.users[scopeUid] ?? { name: record.name, sum: 0, rollCount: 0, lastRolledAt: '' };
+      merged.sum += record.sum;
       merged.rollCount += Number.isFinite(record.rollCount) ? record.rollCount : 0;
+      // 가장 최근에 굴린 채널의 표시 이름을 쓴다.
+      if ((record.lastRolledAt ?? '') >= merged.lastRolledAt) {
+        merged.lastRolledAt = record.lastRolledAt ?? '';
+        merged.name = record.name ?? merged.name;
+      }
       combined.users[scopeUid] = merged;
     }
   }
@@ -1144,7 +1104,7 @@ async function handleInteraction(interaction) {
       return interaction.reply({ content: '❌ 주사위 개수는 1~100 사이여야 합니다.', ephemeral: true });
 
     const faces  = ['-', '0', '+'];                       // -1 / 0 / +1
-    // rollDice(n, 3)의 1·2·3을 -1·0·+1로 옮긴다 — 이러면 주사위 고정도 그대로 적용된다.
+    // rollDice(n, 3)의 1·2·3을 -1·0·+1로 옮긴다.
     const rolls  = rollDice(n, 3).map(v => v - 2);
     const sum    = rolls.reduce((a, b) => a + b, 0);
     const total  = sum + mod;
@@ -1173,18 +1133,14 @@ async function handleInteraction(interaction) {
       const allRankings = loadJSON(RANK_FILE);
       const channelRankings = readRankingChannel(allRankings, interaction.guild.id, interaction.channelId);
       const serverRankings = combinedServerRanking(allRankings, interaction.guild.id);
-      const channelRecords = rankingRecordLists(channelRankings);
-      const serverRecords  = rankingRecordLists(serverRankings);
+      // 채널·서버 두 칸을 나란히 두고, 각 줄은 순위·이름·누적 합계·횟수만 보여준다.
       return interaction.reply({ embeds: [
-        new EmbedBuilder().setTitle(`🏆 #${interaction.channel?.name ?? '현재 채널'} · 서버 전체 행운 랭킹`).setColor(0xF1C40F)
-          .setDescription('`/roll`로 굴린 결과가 자동 기록됩니다. 순위는 **나온 합계**를 먼저 비교하고, 동점이면 **주사위 최댓값**이 큰 쪽을 우선합니다. 비율은 참고용이며, 서버 전체는 이 서버의 채널 기록만 합산합니다.')
+        new EmbedBuilder().setTitle('🏆 행운 랭킹 (누적 합계)').setColor(0xF1C40F)
           .addFields(
-            { name: '🌟 이 채널 높은 값 랭킹', value: formatLuckRanking(channelRecords.high, 'high'), inline: false },
-            { name: '💀 이 채널 낮은 값 랭킹', value: formatLuckRanking(channelRecords.low, 'low'), inline: false },
-            { name: '👑 서버 전체 높은 값 랭킹', value: formatLuckRanking(serverRecords.high, 'high'), inline: false },
-            { name: '☠️ 서버 전체 낮은 값 랭킹', value: formatLuckRanking(serverRecords.low, 'low'), inline: false },
+            { name: `📍 #${interaction.channel?.name ?? '현재 채널'}`, value: formatLuckRanking(rankingRecordList(channelRankings)), inline: true },
+            { name: '👑 서버 전체', value: formatLuckRanking(rankingRecordList(serverRankings)), inline: true },
           )
-          .setFooter({ text: `이 채널 누적 ${channelRankings.rollCount ?? 0}회 · 이 서버 전체 누적 ${serverRankings.rollCount}회 · 각 유저의 최고·최저 기록 · 상위 ${RANKING_DISPLAY_LIMIT}명` })
+          .setFooter({ text: `/roll 결과 합계 순 · 상위 ${RANKING_DISPLAY_LIMIT}명 · 채널 ${channelRankings.rollCount ?? 0}회 / 서버 ${serverRankings.rollCount}회` })
       ]});
     }
 
@@ -1193,7 +1149,7 @@ async function handleInteraction(interaction) {
     const allRankings = loadJSON(RANK_FILE);
     if (allRankings?.[interaction.guild.id]?.channels) delete allRankings[interaction.guild.id].channels[interaction.channelId];
     saveJSON(RANK_FILE, allRankings);
-    return interaction.reply({ content: '✅ 이 채널의 높은 값·낮은 값 랭킹과 누적 횟수를 초기화했습니다. 다른 채널 기록은 유지됩니다.' });
+    return interaction.reply({ content: '✅ 이 채널의 누적 합계 랭킹과 굴림 횟수를 초기화했습니다. 다른 채널 기록은 유지됩니다.' });
   }
 
   // ── 상태등록 (Modal) ──────────────────────────────
@@ -2476,7 +2432,7 @@ async function handleInteraction(interaction) {
     const embed = new EmbedBuilder()
       .setTitle('📖 TRPG 봇 명령어 목록').setColor(0x3498DB)
       .addFields(
-        { name: '🎲 주사위',    value: ['`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-) · 결과는 랭킹에 자동 기록', '`/pateroll 개수:4 [보정:0]` — 페이트 코어 주사위(±1·0) n개 합산', '`/랭킹 보기` — `/roll` 결과 기준으로 현재 채널과 같은 서버 전체의 높은/낮은 값 랭킹'].join('\n'), inline: false },
+        { name: '🎲 주사위',    value: ['`/roll dice:1d20 + 1d10 + 5` — 식 표현식 지원 (XdY, 정수, +/-) · 결과는 랭킹에 자동 기록', '`/pateroll 개수:4 [보정:0]` — 페이트 코어 주사위(±1·0) n개 합산', '`/랭킹 보기` — `/roll` 결과의 누적 합계 순위 (현재 채널 · 서버 전체)'].join('\n'), inline: false },
         { name: '📊 캐릭터 (다중 프로필 지원)',    value: ['`/상태등록 [스탯:체력,근력,민첩,...] [체력계산:체력*4] [사진:첨부]` — 새 캐릭터. 스탯 이름·개수·HP 공식은 캐릭터마다 자유 지정', '`/프로필목록` `/프로필선택 id:N` `/프로필삭제 id:N`', '`/프로필사진 사진:첨부` — 활성 프로필 사진 설정 / `/프로필사진제거`', '`/상태창` `/프로필수정` `/스탯수정` `/소속변경`', '`/분배` `/처치` `/운명점`'].join('\n'), inline: false },
         { name: '⚔️ 스킬·특성·특수스탯', value: ['`/스킬추가` `/스킬제거` `/특성추가` `/특성제거`', '`/특수스탯추가` `/특수스탯제거`'].join('\n'), inline: false },
         { name: '📖 설명·세부사항', value: '`/설명등록` `/세부사항`', inline: false },

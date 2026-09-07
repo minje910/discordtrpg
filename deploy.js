@@ -229,17 +229,45 @@ const commands = [
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
+// 봇이 참여 중인 모든 길드 ID 조회 (봇 토큰으로 /users/@me/guilds 호출)
+async function fetchBotGuildIds() {
+  const guilds = await rest.get(Routes.userGuilds());
+  return guilds.map(g => g.id);
+}
+
+// 지정한 길드들의 길드 한정 커맨드를 비운다 (전역 커맨드와 중복 표시되는 원인 제거)
+async function clearGuildCommands(clientId, guildIds) {
+  for (const gid of guildIds) {
+    try {
+      const existing = await rest.get(Routes.applicationGuildCommands(clientId, gid));
+      if (!existing.length) continue;
+      await rest.put(Routes.applicationGuildCommands(clientId, gid), { body: [] });
+      console.log(`🧹 길드 ${gid}의 잔여 길드 한정 커맨드 ${existing.length}개 삭제`);
+    } catch (err) {
+      console.warn(`⚠️  길드 ${gid} 커맨드 정리 실패: ${err.message}`);
+    }
+  }
+}
+
 (async () => {
   try {
     const clientId = process.env.CLIENT_ID;
     const guildId  = process.env.GUILD_ID;
     if (!clientId) { console.error('❌ CLIENT_ID 환경변수가 필요합니다.'); return; }
 
+    // 같은 커맨드가 전역 + 길드 한정으로 동시에 등록되면 디스코드에 두 번 표시된다.
+    // 어느 모드로 등록하든 반대쪽 범위를 항상 비워 중복을 막는다.
     if (guildId) {
       // 길드 한정 등록 — 즉시 반영, 개발/테스트용
       console.log(`📡 길드 한정 슬래시 커맨드 등록 중... (${commands.length}개, GUILD_ID=${guildId})`);
       await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
       console.log('✅ 길드 한정 등록 완료! (해당 서버에서만 작동)');
+
+      const globalExisting = await rest.get(Routes.applicationCommands(clientId));
+      if (globalExisting.length) {
+        await rest.put(Routes.applicationCommands(clientId), { body: [] });
+        console.log(`🧹 중복 방지: 전역 커맨드 ${globalExisting.length}개 삭제 (최대 1시간 내 반영)`);
+      }
       console.log('ℹ️  여러 서버에서 쓰려면 Railway에서 GUILD_ID 변수를 삭제하세요 (전역 등록 모드 전환).');
     } else {
       // 전역 등록 — 모든 서버에 적용 (최대 1시간 전파)
@@ -247,12 +275,17 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
       await rest.put(Routes.applicationCommands(clientId), { body: commands });
       console.log('✅ 전역 등록 완료! (모든 서버에 적용, 최대 1시간 전파)');
 
-      // 기존에 GUILD_ID로 등록됐던 잔여 커맨드가 있으면 자동 정리
-      const oldGuildId = process.env.OLD_GUILD_ID;
-      if (oldGuildId) {
-        console.log(`🧹 OLD_GUILD_ID(${oldGuildId})의 잔여 길드 한정 커맨드 정리 중...`);
-        await rest.put(Routes.applicationGuildCommands(clientId, oldGuildId), { body: [] });
-        console.log('✅ 잔여 길드 커맨드 삭제 완료.');
+      // 봇이 참여 중인 모든 길드 + OLD_GUILD_ID의 잔여 길드 한정 커맨드 정리
+      const targets = new Set();
+      try {
+        for (const gid of await fetchBotGuildIds()) targets.add(gid);
+      } catch (err) {
+        console.warn(`⚠️  길드 목록 조회 실패: ${err.message}`);
+      }
+      if (process.env.OLD_GUILD_ID) targets.add(process.env.OLD_GUILD_ID);
+      if (targets.size) {
+        console.log(`🧹 ${targets.size}개 길드의 잔여 길드 한정 커맨드 확인 중...`);
+        await clearGuildCommands(clientId, [...targets]);
       }
     }
   } catch (err) {
